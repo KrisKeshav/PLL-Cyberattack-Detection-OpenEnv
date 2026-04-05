@@ -68,11 +68,9 @@ class AttackGenerator:
     def get_signal(self, current_step: int, sim_time: float) -> float:
         """
         Compute the attack signal value at the given step.
-
         Args:
             current_step: Current environment step (0-indexed).
             sim_time: Current simulation time in seconds.
-
         Returns:
             Attack signal value (pu). Returns 0.0 if attack not yet started.
         """
@@ -111,7 +109,7 @@ class AttackGenerator:
         return 0.0
 
     def is_active(self, current_step: int) -> bool:
-        """Check if the attack is currently active at this step."""
+        """Checking if the attack is currently active at this step."""
         if current_step < self.attack_start_step:
             return False
 
@@ -125,7 +123,7 @@ class AttackGenerator:
 
 
 def get_attack_type_id(attack_type_str: str) -> int:
-    """Map attack type string to integer ID."""
+    """Mapping attack type string to integer ID."""
     mapping = {
         "none": 0,
         "sinusoidal": 1,
