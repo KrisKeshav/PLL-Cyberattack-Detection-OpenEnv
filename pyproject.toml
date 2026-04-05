@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pll-cyberattack-detection"
+version = "1.0.0"
+description = "OpenEnv for cyberattack detection on SRF-PLLs in grid-connected inverters"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "numpy",
+    "openenv-core>=0.2.0",
+]
+
+[project.scripts]
+server = "server.app:main"

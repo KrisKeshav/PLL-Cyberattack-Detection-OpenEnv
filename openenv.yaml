@@ -1,0 +1,44 @@
+name: pll-cyberattack-detection
+version: 1.0.0
+description: >
+  OpenEnv environment for AI-driven cyberattack detection on SRF-based
+  Phase-Locked Loops in grid-connected inverters. An agent monitors PLL
+  sensor streams and detects False Data Injection attacks before they
+  cause loss of grid synchronization. Real-world power systems cybersecurity.
+author: Kris Keshav
+tags:
+  - power-systems
+  - cybersecurity
+  - control-systems
+  - openenv
+  - false-data-injection
+tasks:
+  - id: sinusoidal_fdi_detection
+    difficulty: easy
+    description: >
+      Detect presence of a sinusoidal FDI attack injected on the
+      grid voltage sensor. Binary detection task.
+    max_steps: 500
+  - id: multi_attack_classification
+    difficulty: medium
+    description: >
+      Classify the type of ongoing attack (sinusoidal, ramp, or pulse)
+      from the PLL observation window.
+    max_steps: 500
+  - id: stealthy_attack_detection
+    difficulty: hard
+    description: >
+      Detect a low-amplitude stealthy attack causing slow phase drift
+      before PLL loss-of-lock occurs.
+    max_steps: 500
+action_space:
+  type: structured
+  fields:
+    attack_detected: bool
+    attack_type: int
+    confidence: float
+    protective_action: int
+observation_space:
+  type: continuous
+  dim: 103
+episode_length: 500
