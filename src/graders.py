@@ -11,7 +11,6 @@ from typing import List, Dict, Any, Optional
 def grade_task_easy(history: List[Dict[str, Any]], attack_start_step: int) -> float:
     """
     Task 1 — Sinusoidal FDI Detection (Easy).
-
     Grader logic (relative to attack onset):
       delay = first_correct_detection_step - attack_start_step
       if delay <= 20:   score = 1.0
@@ -49,7 +48,6 @@ def grade_task_easy(history: List[Dict[str, Any]], attack_start_step: int) -> fl
 def grade_task_medium(history: List[Dict[str, Any]], attack_start_step: int) -> float:
     """
     Task 2 — Multi-Attack Classification (Medium).
-
     Grader logic:
       base_score = fraction of steps (after attack_start) where attack_type is correctly classified
       early_bonus = 0.4 * max(0, 1 - first_correct_classification_step / 100)
@@ -94,7 +92,6 @@ def grade_task_hard(
 ) -> float:
     """
     Task 3 — Stealthy Low-and-Slow Attack (Hard).
-
     Grader logic:
       if detected before loss_of_lock_step:
           score = 1.0 * (1 - first_detection_step / loss_of_lock_step)
@@ -113,14 +110,14 @@ def grade_task_hard(
         attack_active = entry["attack_active"]
         attack_detected = entry["attack_detected"]
 
-        # Only count false alarms before the attack starts
+        # Only counting false alarms before the attack starts
         if attack_detected and not attack_active and step < attack_start_step:
             false_alarm_count += 1
 
         if attack_detected and attack_active and first_detection_step is None:
             first_detection_step = step
 
-    # Compute base score
+    # Computing base score
     if first_detection_step is None:
         score = 0.0
     elif loss_of_lock_step is not None and first_detection_step < loss_of_lock_step:
@@ -131,7 +128,7 @@ def grade_task_hard(
         # No loss of lock occurred but attack was detected
         score = 0.3
 
-    # Apply false alarm penalty
+    # Applying false alarm penalty
     penalty = 0.2 * false_alarm_count
     score = max(0.0, score - penalty)
 
