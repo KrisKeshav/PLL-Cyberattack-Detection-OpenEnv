@@ -16,7 +16,6 @@ Steps:
 import numpy as np
 import math
 
-
 # Constants
 V_NOM = 1.0           # Nominal voltage (pu)
 F0 = 50.0             # Grid frequency (Hz)
@@ -56,7 +55,6 @@ class SRFPLLSimulator:
     def step(self, attack_signal: float = 0.0):
         """
         Advance the PLL by one time step.
-
         Args:
             attack_signal: Attack injection added to va (pu).
 
@@ -97,7 +95,7 @@ class SRFPLLSimulator:
         # Update time
         self.t += DT
 
-        # Store current values
+        # Storing current values
         self.vd = vd
         self.vq = vq
         self.omega_hat = omega_hat
