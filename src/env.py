@@ -4,23 +4,6 @@ Main environment class for the PLL Cyberattack Detection OpenEnv.
 Implements step(), reset(), get_state(), and compute_reward().
 Manages the PLL simulation, attack injection, observation windowing,
 episode history, and grading.
-
-Fixes applied vs previous version:
-  1. grade_task_easy() now receives attack_start_step (was missing, causing
-     TypeError at episode end for task_id=0).
-  2. attack_active is derived from attack_signal != 0.0 instead of
-     is_active() — single source of truth prevents signal/label divergence.
-  3. Lock-loss check guarded by step_count > attack_start_step — prevents
-     spurious lock-loss from PLL transient on step 0.
-  4. Task 3 early termination added: done=True when lock_lost, not just at
-     step 500. Avoids 200+ meaningless steps after failure.
-  5. _get_observation() updated to remove theta_err_window (ground-truth
-     leak) and add omega_deviation_window (raw omega deviation in rad/s),
-     matching the corrected Observation model.
-  6. theta_err_window deque removed from instance state.
-  7. Initial raw_voltages fixed: pll is warm-started with one silent step so
-     va_m/vb_m/vc_m are non-zero at reset() return.
-  8. omega_deviation_window deque added for the new Observation field.
 """
 
 import uuid
@@ -91,12 +74,10 @@ class PLLAttackEnv:
     def reset(self, task_id: int = 0, seed: Optional[int] = None) -> Observation:
         """
         Reset the environment for a new episode.
-
         Args:
             task_id: 0=easy (sinusoidal), 1=medium (multi-type),
                      2=hard (stealthy).
             seed:    Optional RNG seed for reproducibility.
-
         Returns:
             Initial Observation with non-zero raw_voltages.
         """
@@ -130,10 +111,7 @@ class PLLAttackEnv:
 
         # Sample attack for this episode
         self._setup_attack()
-
-        # Fix 7: warm-start PLL with WINDOW_SIZE silent steps so that
-        # windows contain realistic (non-zero) PLL-settled values and
-        # raw_voltages are non-zero on the first observation.
+      
         for _ in range(WINDOW_SIZE):
             pll_out = self.pll.step(0.0)  # no attack during warm-up
             omega_norm = (pll_out["omega_hat"] - OMEGA0) / OMEGA0
@@ -149,10 +127,8 @@ class PLLAttackEnv:
     def step(self, action: Action) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
         """
         Advance the environment by one step.
-
         Args:
             action: Agent's Action for this step.
-
         Returns:
             (observation, reward, done, info)
         """
@@ -169,15 +145,13 @@ class PLLAttackEnv:
             )
 
         # --- Attack signal ------------------------------------------------
-        # Fix 2: derive attack_active from the actual injected signal value,
-        # not from is_active(). Single source of truth — label matches physics.
         attack_signal = self.attack_generator.get_signal(self.step_count, self.pll.t)
         self.attack_active = self.attack_generator.is_active(self.step_count)
 
         # --- Advance PLL --------------------------------------------------
         pll_out = self.pll.step(attack_signal)
 
-        # --- Update observation windows -----------------------------------
+        # --- Updating observation windows -----------------------------------
         omega_norm = (pll_out["omega_hat"] - OMEGA0) / OMEGA0
         omega_dev  = pll_out["omega_hat"] - OMEGA0  # raw deviation (rad/s)
         self.vq_window.append(pll_out["vq"])
@@ -185,13 +159,13 @@ class PLLAttackEnv:
         self.omega_window.append(omega_norm)
         self.omega_deviation_window.append(omega_dev)
 
-        # --- Lock-loss check (Task 2 / hard only) -------------------------
-        PLL_CONVERGENCE_STEPS = 60  # PLL transient settles by ~step 50, use 60 for margin
+        # --- Lock-loss check (Task 2) -------------------------
+        PLL_CONVERGENCE_STEPS = 60  # PLL transient settles by ~step 50, using 60 for margin
         if (
             self.task_id == 2
             and not self.lock_lost
             and self.step_count > self.attack_start_step
-            and self.step_count > PLL_CONVERGENCE_STEPS   # ← guard against startup transient
+            and self.step_count > PLL_CONVERGENCE_STEPS   # guard against startup transient
         ):
             if abs(pll_out["theta_err"]) > LOCK_LOSS_THRESHOLD:
                 self.lock_lost = True
@@ -232,8 +206,7 @@ class PLLAttackEnv:
 
     def compute_reward(self, action: Action) -> Reward:
         """
-        Compute the dense reward signal for the current step.
-
+        Computes the dense reward signal for the current step.
         Reward components:
           detection_reward:     +0.10 true positive (per step)
                                 +0.05 true negative (per step)
@@ -295,7 +268,7 @@ class PLLAttackEnv:
         )
 
     def get_state(self) -> State:
-        """Return full internal state for debugging / GET /state endpoint."""
+        """Returning full internal state for debugging / GET /state endpoint."""
         return State(
             theta_true=self.pll.theta_true,
             theta_hat=self.pll.theta_hat,
@@ -347,13 +320,7 @@ class PLLAttackEnv:
 
     def _get_observation(self) -> Observation:
         """
-        Build the current Observation from internal windows.
-
-        Fix 5: theta_err_window replaced with omega_deviation_window.
-        theta_err requires knowing theta_true (not observable in a real
-        inverter) and leaked ground truth directly to the agent.
-        omega_deviation (omega_hat - OMEGA0 in rad/s) is a realistic proxy
-        that correlates with phase drift under stealthy attacks.
+        Building the current Observation from internal windows.
         """
         return Observation(
             vq_window=list(self.vq_window),
@@ -366,7 +333,7 @@ class PLLAttackEnv:
         )
 
     def _compute_grader_score(self) -> float:
-        """Run the appropriate grader at episode end."""
+        """Running the appropriate grader at episode end."""
         if self.task_id == 0:
             return grade_task_easy(self.history, self.attack_start_step)
         elif self.task_id == 1:
