@@ -1,12 +1,12 @@
 """
-server/app.py — Server entry point for openenv validate compatibility.
+This is the server entry point for openenv validate compatibility.
 """
 import uvicorn
 from src.api import app  # noqa: F401
 
 
 def main():
-    """Start the FastAPI server."""
+    """Starting the FastAPI server."""
     uvicorn.run(
         "src.api:app",
         host="0.0.0.0",
