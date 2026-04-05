@@ -1,17 +1,16 @@
 """
 Inference Script — PLL Cyberattack Detection OpenEnv
 =====================================================
-MANDATORY environment variables:
+Environment variables:
   API_BASE_URL   The API endpoint for the LLM
-  MODEL_NAME     The model identifier to use
-  HF_TOKEN       Your Hugging Face / API key
+  MODEL_NAME     The model used
+  HF_TOKEN       My Hugging Face token
 
 Uses a HYBRID approach:
   - A fast rule-based heuristic agent runs by default (no LLM needed)
   - The heuristic analyzes vq/omega_deviation windows to detect attacks
-  - Set USE_LLM=1 env var to use the LLM instead (slower, may fail)
+  - Set USE_LLM=1 env var to use the LLM instead (slower, may fail (this is prone to rate limit exhausted errors))
 
-Must be named inference.py and placed at the project root.
 Uses OpenAI client for LLM calls when enabled.
 """
 
@@ -114,14 +113,12 @@ class HeuristicState:
 
 _hstate = HeuristicState()
 
-
 def heuristic_agent(obs: dict) -> dict:
     """
     Rule-based attack detector using cumulative state tracking.
-    No LLM needed — runs instantly.
-
+    This runs instantly.
     The key insight is that the PLL's closed-loop response transforms
-    attack signals, so we track statistics over time rather than
+    attack signals, so I track statistics over time rather than
     trying to classify from a single 20-step vq window shape.
     """
     global _hstate
@@ -133,7 +130,7 @@ def heuristic_agent(obs: dict) -> dict:
     if step == 0:
         _hstate.reset()
 
-    # --- Compute per-step features ---
+    # --- Computing per-step features ---
     vq_abs = [abs(v) for v in vq]
     vq_mean = sum(vq_abs) / len(vq_abs)
     vq_max = max(vq_abs)
@@ -142,12 +139,12 @@ def heuristic_agent(obs: dict) -> dict:
     omega_dev_abs = [abs(v) for v in omega_dev]
     omega_dev_mean = sum(omega_dev_abs) / len(omega_dev_abs)
 
-    # Track history
+    # Tracking history
     _hstate.vq_history.append(vq_mean)
     _hstate.omega_dev_history.append(omega_dev_mean)
     _hstate.peak_vq = max(_hstate.peak_vq, vq_mean)
 
-    # Record baseline around step 45-50 (PLL settled)
+    # Recording baseline around step 45-50 (PLL settled)
     if step == 50:
         _hstate.settled_baseline = omega_dev_mean
 
@@ -253,7 +250,7 @@ def heuristic_agent(obs: dict) -> dict:
         }
 
     # -----------------------------------------------------------------
-    # Task 2: Stealthy attack — detect omega_dev rising above baseline
+    # Task 2: Stealthy attack — detecting omega_dev rising above baseline
     # -----------------------------------------------------------------
     if task_id == 2:
         drift_detected = False
@@ -265,7 +262,7 @@ def heuristic_agent(obs: dict) -> dict:
             # Compare current to baseline
             ratio = omega_dev_mean / baseline if baseline > 0.01 else omega_dev_mean * 100
 
-            # Check if omega_dev is rising relative to recent history
+            # Checking if omega_dev is rising relative to recent history
             if len(_hstate.omega_dev_history) > 10:
                 recent_10 = _hstate.omega_dev_history[-10:]
                 old_10 = _hstate.omega_dev_history[-20:-10] if len(_hstate.omega_dev_history) > 20 else _hstate.omega_dev_history[:10]
@@ -302,11 +299,11 @@ def heuristic_agent(obs: dict) -> dict:
 
 
 # =====================================================================
-# LLM Agent (optional, set USE_LLM=1)
+# LLM Agent (set USE_LLM=1)
 # =====================================================================
 
 def parse_llm_response(response_text: str) -> dict:
-    """Parse LLM response JSON, returning default action on failure."""
+    """Parsing LLM response JSON, returning default action on failure."""
     try:
         text = response_text.strip()
         if text.startswith("```"):
@@ -350,7 +347,7 @@ def format_observation(obs: dict) -> str:
 
 
 def llm_agent(obs: dict) -> dict:
-    """Call the LLM to decide an action. Falls back to heuristic on error."""
+    """Calling the LLM to decide an action. Falls back to heuristic on any error."""
     try:
         obs_text = format_observation(obs)
         completion = client.chat.completions.create(
