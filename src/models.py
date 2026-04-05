@@ -53,9 +53,7 @@ class State(BaseModel):
     @classmethod
     def coerce_attack_params(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Coerce numpy scalar types inside attack_params to native Python types.
-        sample_*_params() casts with float()/int() but a future contributor
-        may forget. This validator ensures JSON serialization never fails due
+        This validator ensures JSON serialization never fails due
         to np.float32 / np.int64 / np.bool_ leaking into the params dict.
         """
         params = values.get("attack_params", {})
