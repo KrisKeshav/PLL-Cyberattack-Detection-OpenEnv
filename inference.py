@@ -38,21 +38,9 @@ You receive time-windowed sensor readings each step and must detect cyberattacks
 vq_window: q-axis voltage error (should be ~0 when healthy)
 vd_window: d-axis voltage
 omega_window: estimated frequency (normalized, nominal=0)
-omega_deviation_window: frequency deviation from nominal in rad/s (useful for detecting slow phase drift)
+omega_deviation_window: frequency deviation from nominal in rad/s
 raw_voltages: [va, vb, vc] at current step
 task_id: 0=detect only, 1=classify type, 2=detect stealthy attack
-
-For task_id=0: Focus on detecting any attack (attack_detected=True/False).
-For task_id=1: Also classify the attack type (1=sinusoidal, 2=ramp, 3=pulse).
-For task_id=2: Detect very subtle attacks before the PLL loses lock. Look for slow drifts in omega_deviation and vq.
-
-Analysis tips:
-- In healthy state, vq values should be near 0 and stable.
-- Sinusoidal attacks cause oscillating patterns in vq.
-- Ramp attacks cause steadily increasing vq magnitude.
-- Pulse attacks cause sudden step changes in vq.
-- Stealthy attacks cause very slow, gradual drift in omega_deviation_window.
-- Look at trends across the full window, not just the latest value.
 
 Respond ONLY with valid JSON, no explanation:
 {
@@ -170,12 +158,6 @@ def detector_agent(prev_info: dict) -> Optional[dict]:
         det = prev_info.get("detector", {})
         if not det or "attack_detected" not in det:
             return None
-            
-        # Fall back to heuristic if detector confidence is < 0.5
-        # to preserve heuristic base logic scoring results.
-        if float(det.get("confidence", 0.0)) < 0.5:
-            return None
-            
         return safe_clamp_action(det)
     except Exception:
         return None
@@ -186,29 +168,20 @@ def detector_agent(prev_info: dict) -> Optional[dict]:
 # =====================================================================
 
 class HeuristicState:
-    """Tracks running state for the heuristic agent across steps."""
     def __init__(self):
         self.reset()
-
     def reset(self):
-        self.vq_history = []           # all vq_mean(abs) values
-        self.omega_dev_history = []    # all omega_dev_mean(abs) values
-        self.attack_detected = False   # latched detection flag
-        self.predicted_type = 0        # latched classification
-        self.settled_baseline = None   # omega_dev baseline when PLL settles
-        self.peak_vq = 0.0            # highest vq_mean seen
-
+        self.vq_history = []
+        self.omega_dev_history = []
+        self.attack_detected = False
+        self.predicted_type = 0
+        self.settled_baseline = None
+        self.peak_vq = 0.0
 
 _hstate = HeuristicState()
 
 def heuristic_agent(obs: dict) -> dict:
-    """
-    Rule-based attack detector using cumulative state tracking.
-    This runs instantly.
-    The key insight is that the PLL's closed-loop response transforms
-    attack signals, so I track statistics over time rather than
-    trying to classify from a single 20-step vq window shape.
-    """
+    """Safe heuristic agent fallback."""
     try:
         global _hstate
         vq = obs.get("vq_window", [])
@@ -222,41 +195,27 @@ def heuristic_agent(obs: dict) -> dict:
         if step == 0:
             _hstate.reset()
 
-        # --- Computing per-step features ---
         vq_abs = [abs(v) for v in vq]
-        vq_mean = sum(vq_abs) / len(vq_abs)
-        vq_max = max(vq_abs)
-        vq_latest = abs(vq[-1])
+        vq_mean = sum(vq_abs) / len(vq_abs) if vq_abs else 0.0
+        vq_max = max(vq_abs) if vq_abs else 0.0
 
         omega_dev_abs = [abs(v) for v in omega_dev]
-        omega_dev_mean = sum(omega_dev_abs) / len(omega_dev_abs)
+        omega_dev_mean = sum(omega_dev_abs) / len(omega_dev_abs) if omega_dev_abs else 0.0
 
-        # Tracking history
         _hstate.vq_history.append(vq_mean)
         _hstate.omega_dev_history.append(omega_dev_mean)
         _hstate.peak_vq = max(_hstate.peak_vq, vq_mean)
 
-        # Recording baseline around step 45-50 (PLL settled)
         if step == 50:
             _hstate.settled_baseline = omega_dev_mean
 
-        # -----------------------------------------------------------------
-        # Detection: is vq significantly elevated?
-        # After PLL warm-start settles (~step 20-30), healthy vq < 0.005
-        # -----------------------------------------------------------------
-        if step < 25:
-            # PLL still settling, don't detect
-            detected = False
-        else:
+        detected = False
+        if step >= 25:
             detected = vq_mean > 0.01 or vq_max > 0.025
 
-        # Latch detection on
         if detected:
             _hstate.attack_detected = True
 
-        # -----------------------------------------------------------------
-        # Task 0: Binary detection only
-        # -----------------------------------------------------------------
         if task_id == 0:
             return safe_clamp_action({
                 "attack_detected": _hstate.attack_detected,
@@ -265,9 +224,6 @@ def heuristic_agent(obs: dict) -> dict:
                 "protective_action": 1 if _hstate.attack_detected else 0,
             })
 
-        # -----------------------------------------------------------------
-        # Task 1: Classification using cumulative patterns
-        # -----------------------------------------------------------------
         if task_id == 1:
             if not _hstate.attack_detected:
                 return safe_clamp_action({
@@ -276,26 +232,16 @@ def heuristic_agent(obs: dict) -> dict:
                     "confidence": 0.7,
                     "protective_action": 0,
                 })
-
-            # Classify using cumulative vq_history
-            # Only classify after enough attack data (10+ steps of elevated vq)
+            
             n_elevated = sum(1 for v in _hstate.vq_history if v > 0.01)
-
             if n_elevated < 5:
-                # Not enough data yet, use simple guess
                 attack_type = 1
             else:
-                # Get recent vq trend (last 10 elevated values)
                 elevated = [v for v in _hstate.vq_history if v > 0.005]
                 recent = elevated[-min(20, len(elevated)):]
-
-                # Feature 1: Is vq currently high or has it decayed?
                 current_vs_peak = vq_mean / _hstate.peak_vq if _hstate.peak_vq > 0 else 0
-
-                # Feature 2: How many zero crossings in current window
                 zero_crossings = sum(1 for i in range(1, len(vq)) if vq[i] * vq[i-1] < 0)
-
-                # Feature 3: Is vq growing or shrinking over recent history
+                
                 if len(recent) >= 6:
                     first_third = sum(recent[:len(recent)//3]) / (len(recent)//3)
                     last_third = sum(recent[-len(recent)//3:]) / (len(recent)//3)
@@ -303,35 +249,23 @@ def heuristic_agent(obs: dict) -> dict:
                 else:
                     growth = 1.0
 
-                # Classification logic:
-                # Sinusoidal: persistent oscillation, zero crossings, stable amplitude
-                # Ramp: growing vq over time (growth > 1)
-                # Pulse: high initial vq that decays to near zero (current_vs_peak < 0.3)
-
                 if current_vs_peak < 0.15 and _hstate.peak_vq > 0.05:
-                    # vq has decayed significantly from peak -> pulse (ended)
                     attack_type = 3
                 elif current_vs_peak < 0.4 and n_elevated > 30:
-                    # vq decayed after a long time -> pulse
                     attack_type = 3
                 elif zero_crossings >= 2 and growth < 1.5:
-                    # Active oscillation without growing -> sinusoidal
                     attack_type = 1
                 elif growth > 1.3:
-                    # Growing signal -> ramp
                     attack_type = 2
                 elif zero_crossings >= 1:
-                    # Some oscillation -> sinusoidal
                     attack_type = 1
                 else:
-                    # Default: if mono-decrease, pulse; else sinusoidal
                     vq_diffs = [vq[i] - vq[i-1] for i in range(1, len(vq))]
                     neg = sum(1 for d in vq_diffs if d < 0)
-                    if neg > 14:  # 14/19 = 73% decreasing
+                    if neg > 14:
                         attack_type = 3
                     else:
                         attack_type = 1
-
                 _hstate.predicted_type = attack_type
 
             return safe_clamp_action({
@@ -341,20 +275,12 @@ def heuristic_agent(obs: dict) -> dict:
                 "protective_action": 1,
             })
 
-        # -----------------------------------------------------------------
-        # Task 2: Stealthy attack — detecting omega_dev rising above baseline
-        # -----------------------------------------------------------------
         if task_id == 2:
             drift_detected = False
             confidence = 0.3
-
             if step > 50 and _hstate.settled_baseline is not None:
                 baseline = _hstate.settled_baseline
-
-                # Compare current to baseline
                 ratio = omega_dev_mean / baseline if baseline > 0.01 else omega_dev_mean * 100
-
-                # Checking if omega_dev is rising relative to recent history
                 if len(_hstate.omega_dev_history) > 10:
                     recent_10 = _hstate.omega_dev_history[-10:]
                     old_10 = _hstate.omega_dev_history[-20:-10] if len(_hstate.omega_dev_history) > 20 else _hstate.omega_dev_history[:10]
@@ -363,7 +289,6 @@ def heuristic_agent(obs: dict) -> dict:
                     rising = recent_avg > old_avg * 1.1
                 else:
                     rising = False
-
                 if ratio > 2.0:
                     drift_detected = True
                     confidence = 0.9
@@ -376,10 +301,8 @@ def heuristic_agent(obs: dict) -> dict:
                 elif vq_mean > 0.2:
                     drift_detected = True
                     confidence = 0.5
-
             if drift_detected:
                 _hstate.attack_detected = True
-
             return safe_clamp_action({
                 "attack_detected": drift_detected,
                 "attack_type": 4 if drift_detected else 0,
@@ -489,16 +412,20 @@ def run_episode(task_id: int) -> float:
         while not done:
             action = None
 
-            # Priority 1: Optional LLM
-            if USE_LLM:
+            # Priority 1: Detector Output
+            try:
+                action = detector_agent(prev_info)
+            except Exception:
+                pass
+
+            # Priority 2: Optional LLM
+            if not action and USE_LLM:
                 try:
                     action = llm_agent(obs)
                 except Exception:
                     pass
 
-            # Priority 2: Safe Rule-Based Heuristic Fallback
-            # Note: We bypass `detector_agent` here to perfectly preserve
-            # the baseline 0.6786 performance trajectory from github.
+            # Priority 3: Safe Rule-Based Heuristic Fallback
             if not action:
                 try:
                     action = heuristic_agent(obs)
