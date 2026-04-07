@@ -6,6 +6,7 @@ Exposes HTTP endpoints for environment interaction:
   POST /step    — Submit an action and advance one step
   GET  /state   — Get current internal state
   GET  /health  — Health check (returns 200)
+  GET  /tasks   — List available tasks
 """
 
 import asyncio
@@ -72,4 +73,39 @@ async def get_state():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "environment": "pll-cyberattack-detection",
+        "tasks_available": 3,
+        "episode_active": env.attack_generator is not None,
+        "current_step": env.step_count,
+    }
+
+
+@app.get("/tasks")
+async def list_tasks():
+    """List all available tasks."""
+    return {
+        "tasks": [
+            {
+                "id": 0,
+                "name": "sinusoidal_fdi",
+                "difficulty": "easy",
+                "description": "Detect sinusoidal FDI attack"
+            },
+            {
+                "id": 1,
+                "name": "multi_attack_classification",
+                "difficulty": "medium",
+                "description": "Classify attack type from observations"
+            },
+            {
+                "id": 2,
+                "name": "stealthy_attack_detection",
+                "difficulty": "hard",
+                "description": "Detect stealthy attack before PLL lock loss"
+            },
+        ]
+    }

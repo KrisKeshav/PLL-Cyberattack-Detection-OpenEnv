@@ -1,16 +1,17 @@
 """
 Inference Script — PLL Cyberattack Detection OpenEnv
 =====================================================
-Environment variables:
+MANDATORY environment variables:
   API_BASE_URL   The API endpoint for the LLM
-  MODEL_NAME     The model used
-  HF_TOKEN       My Hugging Face token
+  MODEL_NAME     The model identifier to use
+  HF_TOKEN       Your Hugging Face / API key
 
 Uses a HYBRID approach:
   - A fast rule-based heuristic agent runs by default (no LLM needed)
   - The heuristic analyzes vq/omega_deviation windows to detect attacks
-  - Set USE_LLM=1 env var to use the LLM instead (slower, may fail (this is prone to rate limit exhausted errors))
+  - Set USE_LLM=1 env var to use the LLM instead (slower, may fail)
 
+Must be named inference.py and placed at the project root.
 Uses OpenAI client for LLM calls when enabled.
 """
 
@@ -22,13 +23,13 @@ import math
 import requests
 from openai import OpenAI
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-API_KEY = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "dummy")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
 ENV_URL = os.getenv("ENV_URL", "https://krishuggingface-cyberattack-pll.hf.space")
-USE_LLM = os.environ.get("USE_LLM", "1") == "1"
+USE_LLM = os.environ.get("USE_LLM", "0") == "1"
 
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 SYSTEM_PROMPT = """You are an AI agent monitoring a power grid inverter's Phase-Locked Loop (PLL).
 You receive time-windowed sensor readings each step and must detect cyberattacks.
@@ -131,12 +132,14 @@ class HeuristicState:
 
 _hstate = HeuristicState()
 
+
 def heuristic_agent(obs: dict) -> dict:
     """
     Rule-based attack detector using cumulative state tracking.
-    This runs instantly.
+    No LLM needed — runs instantly.
+
     The key insight is that the PLL's closed-loop response transforms
-    attack signals, so I track statistics over time rather than
+    attack signals, so we track statistics over time rather than
     trying to classify from a single 20-step vq window shape.
     """
     global _hstate
@@ -148,7 +151,7 @@ def heuristic_agent(obs: dict) -> dict:
     if step == 0:
         _hstate.reset()
 
-    # --- Computing per-step features ---
+    # --- Compute per-step features ---
     vq_abs = [abs(v) for v in vq]
     vq_mean = sum(vq_abs) / len(vq_abs)
     vq_max = max(vq_abs)
@@ -157,12 +160,12 @@ def heuristic_agent(obs: dict) -> dict:
     omega_dev_abs = [abs(v) for v in omega_dev]
     omega_dev_mean = sum(omega_dev_abs) / len(omega_dev_abs)
 
-    # Tracking history
+    # Track history
     _hstate.vq_history.append(vq_mean)
     _hstate.omega_dev_history.append(omega_dev_mean)
     _hstate.peak_vq = max(_hstate.peak_vq, vq_mean)
 
-    # Recording baseline around step 45-50 (PLL settled)
+    # Record baseline around step 45-50 (PLL settled)
     if step == 50:
         _hstate.settled_baseline = omega_dev_mean
 
@@ -268,7 +271,7 @@ def heuristic_agent(obs: dict) -> dict:
         }
 
     # -----------------------------------------------------------------
-    # Task 2: Stealthy attack — detecting omega_dev rising above baseline
+    # Task 2: Stealthy attack — detect omega_dev rising above baseline
     # -----------------------------------------------------------------
     if task_id == 2:
         drift_detected = False
@@ -280,7 +283,7 @@ def heuristic_agent(obs: dict) -> dict:
             # Compare current to baseline
             ratio = omega_dev_mean / baseline if baseline > 0.01 else omega_dev_mean * 100
 
-            # Checking if omega_dev is rising relative to recent history
+            # Check if omega_dev is rising relative to recent history
             if len(_hstate.omega_dev_history) > 10:
                 recent_10 = _hstate.omega_dev_history[-10:]
                 old_10 = _hstate.omega_dev_history[-20:-10] if len(_hstate.omega_dev_history) > 20 else _hstate.omega_dev_history[:10]
@@ -317,11 +320,11 @@ def heuristic_agent(obs: dict) -> dict:
 
 
 # =====================================================================
-# LLM Agent (set USE_LLM=1)
+# LLM Agent (optional, set USE_LLM=1)
 # =====================================================================
 
 def parse_llm_response(response_text: str) -> dict:
-    """Parsing LLM response JSON, returning default action on failure."""
+    """Parse LLM response JSON, returning default action on failure."""
     try:
         text = response_text.strip()
         if text.startswith("```"):
@@ -365,7 +368,7 @@ def format_observation(obs: dict) -> str:
 
 
 def llm_agent(obs: dict) -> dict:
-    """Calling the LLM to decide an action. Falls back to heuristic on any error."""
+    """Call the LLM to decide an action. Falls back to heuristic on error."""
     try:
         obs_text = format_observation(obs)
         completion = client.chat.completions.create(
@@ -416,10 +419,21 @@ def run_episode(task_id: int) -> float:
 
         while not done:
             # Choose agent
-            try:
+            if USE_LLM:
                 action = llm_agent(obs)
-            except Exception:
-                action = heuristic_agent(obs)
+            else:
+                if step_count == 0:
+                    action = DEFAULT_ACTION.copy()
+                else:
+                    det_action = detector_agent(prev_info) if "detector" in prev_info else None
+                    heur_action = heuristic_agent(obs)
+                    
+                    if not det_action:
+                        action = heur_action
+                    elif det_action["confidence"] < 0.5:
+                        action = heur_action
+                    else:
+                        action = heur_action
 
             # Step environment
             step_response = requests.post(

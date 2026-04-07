@@ -1,44 +1,65 @@
 name: pll-cyberattack-detection
 version: 1.0.0
 description: >
-  OpenEnv environment for AI-driven cyberattack detection on SRF-based
-  Phase-Locked Loops in grid-connected inverters. An agent monitors PLL
-  sensor streams and detects False Data Injection attacks before they
-  cause loss of grid synchronization. Real-world power systems cybersecurity.
-author: Kris Keshav
-tags:
-  - power-systems
-  - cybersecurity
-  - control-systems
-  - openenv
-  - false-data-injection
-tasks:
-  - id: sinusoidal_fdi_detection
-    difficulty: easy
-    description: >
-      Detect presence of a sinusoidal FDI attack injected on the
-      grid voltage sensor. Binary detection task.
-    max_steps: 500
-  - id: multi_attack_classification
-    difficulty: medium
-    description: >
-      Classify the type of ongoing attack (sinusoidal, ramp, or pulse)
-      from the PLL observation window.
-    max_steps: 500
-  - id: stealthy_attack_detection
-    difficulty: hard
-    description: >
-      Detect a low-amplitude stealthy attack causing slow phase drift
-      before PLL loss-of-lock occurs.
-    max_steps: 500
-action_space:
-  type: structured
-  fields:
-    attack_detected: bool
-    attack_type: int
-    confidence: float
-    protective_action: int
+  Real-world OpenEnv for cyberattack detection on SRF-based 
+  Phase-Locked Loops in grid-connected inverters. An agent monitors 
+  sensor streams and detects False Data Injection attacks before 
+  they cause loss of grid synchronization.
+tags: [power-systems, cybersecurity, control-systems, openenv, pll, fdi]
+reward_range: [-2.2, 1.15]
 observation_space:
   type: continuous
-  dim: 103
+  shape: [83]
+  fields:
+    - name: vq_window
+      shape: [20]
+      description: q-axis voltage error signal (pu)
+    - name: vd_window
+      shape: [20]
+      description: d-axis voltage (pu)
+    - name: omega_window
+      shape: [20]
+      description: normalized frequency deviation from nominal
+    - name: omega_deviation_window
+      shape: [20]
+      description: frequency deviation from nominal (rad/s)
+    - name: raw_voltages
+      shape: [3]
+      description: raw three-phase voltages [va, vb, vc] (pu)
+action_space:
+  type: mixed
+  fields:
+    - name: attack_detected
+      type: bool
+    - name: attack_type
+      type: int
+      range: [0, 4]
+    - name: confidence
+      type: float
+      range: [0.0, 1.0]
+    - name: protective_action
+      type: int
+      range: [0, 3]
+tasks:
+  - id: sinusoidal_fdi
+    difficulty: easy
+    numeric_id: 0
+    grader: time_to_detection
+    max_score: 1.0
+    episode_length: 500
+    description: Detect sinusoidal FDI attack within 100 steps of attack start
+  - id: multi_attack_classification
+    difficulty: medium
+    numeric_id: 1
+    grader: classification_accuracy
+    max_score: 1.0
+    episode_length: 500
+    description: Classify attack type from observation window
+  - id: stealthy_attack_detection
+    difficulty: hard
+    numeric_id: 2
+    grader: pre_lock_loss_detection
+    max_score: 1.0
+    episode_length: 500
+    description: Detect stealthy low-amplitude attack before PLL loss-of-lock
 episode_length: 500

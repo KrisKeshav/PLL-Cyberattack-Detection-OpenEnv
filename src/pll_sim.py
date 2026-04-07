@@ -33,7 +33,11 @@ def wrap_angle(angle: float) -> float:
 class SRFPLLSimulator:
     """Discrete-time SRF-PLL simulator."""
 
-    def __init__(self):
+    def __init__(self, rng: np.random.Generator = None,
+                 kp: float = None, ki: float = None):
+        self.rng = rng or np.random.default_rng()
+        self.kp = kp if kp is not None else KP
+        self.ki = ki if ki is not None else KI
         self.reset()
 
     def reset(self):
@@ -71,9 +75,15 @@ class SRFPLLSimulator:
         vb_m = vb
         vc_m = vc
 
+        # Measurement noise (σ = 0.01 pu, realistic for grid sensors)
+        NOISE_STD = 0.01
+        va_m += self.rng.normal(0, NOISE_STD)
+        vb_m += self.rng.normal(0, NOISE_STD)
+        vc_m += self.rng.normal(0, NOISE_STD)
+
         # Step 3 — Clarke Transform (αβ)
         v_alpha = va_m
-        v_beta = (va_m + 2.0 * vb_m) / math.sqrt(3.0)
+        v_beta = -(va_m + 2.0 * vb_m) / math.sqrt(3.0)
 
         # Step 4 — Park Transform (dq) using estimated angle θ̂
         cos_th = math.cos(self.theta_hat)
@@ -82,12 +92,12 @@ class SRFPLLSimulator:
         vq = -v_alpha * sin_th + v_beta * cos_th
 
         # Step 5 — PI Controller
-        self.vq_integral += vq * DT
-        omega_hat = OMEGA0 + KP * vq + KI * self.vq_integral
-        self.theta_hat += omega_hat * DT
+        self.vq_integral = np.clip(self.vq_integral + vq * DT, -0.3, 0.3)
+        omega_hat = OMEGA0 + self.kp * vq + self.ki * self.vq_integral
+        self.theta_hat = wrap_angle(self.theta_hat + omega_hat * DT)
 
         # Advance true angle
-        self.theta_true += OMEGA0 * DT
+        self.theta_true = wrap_angle(self.theta_true + OMEGA0 * DT)
 
         # Step 6 — Phase error wrapped to [-π, π]
         theta_err = wrap_angle(self.theta_hat - self.theta_true)

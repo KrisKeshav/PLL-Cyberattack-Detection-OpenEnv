@@ -23,11 +23,21 @@ from src.attacks import (
     get_attack_type_id,
 )
 from src.graders import grade_task_easy, grade_task_medium, grade_task_hard
+from src.detector import AdaptiveDetector
 
 
 WINDOW_SIZE = 20
 MAX_STEPS = 500
 LOCK_LOSS_THRESHOLD = 0.0873  # 5 degrees in radians
+
+DETECTION_THRESHOLD = 2.0
+EARLY_DETECTION_WINDOW = 100
+FALSE_ALARM_PENALTY = -0.2
+TRUE_POSITIVE_REWARD = 0.1
+TRUE_NEGATIVE_REWARD = 0.05
+MISSED_DETECTION_PENALTY = -0.05
+CLASSIFICATION_BONUS = 0.05
+LOCK_LOSS_PENALTY = -2.0
 
 
 class PLLAttackEnv:
@@ -58,11 +68,14 @@ class PLLAttackEnv:
         self.lock_loss_step: Optional[int] = None
         self.lock_loss_penalized = False
 
-        # Observation windows (Fix 6: theta_err_window removed)
+        # Observation windows
         self.vq_window: deque = deque(maxlen=WINDOW_SIZE)
         self.vd_window: deque = deque(maxlen=WINDOW_SIZE)
         self.omega_window: deque = deque(maxlen=WINDOW_SIZE)
         self.omega_deviation_window: deque = deque(maxlen=WINDOW_SIZE)  # Fix 8
+
+        # Detector
+        self.detector = AdaptiveDetector()
 
         # Episode history for grading
         self.history: List[Dict[str, Any]] = []
@@ -109,6 +122,9 @@ class PLLAttackEnv:
         self.omega_window = deque(maxlen=WINDOW_SIZE)
         self.omega_deviation_window = deque(maxlen=WINDOW_SIZE)
 
+        # Reset detector
+        self.detector = AdaptiveDetector()
+
         # Sample attack for this episode
         self._setup_attack()
       
@@ -145,6 +161,8 @@ class PLLAttackEnv:
             )
 
         # --- Attack signal ------------------------------------------------
+        # attack_active uses is_active() (step-based). It does NOT depend on the instantaneous
+        # signal value, because the attack signal can cross zero even while the attack is active.
         attack_signal = self.attack_generator.get_signal(self.step_count, self.pll.t)
         self.attack_active = self.attack_generator.is_active(self.step_count)
 
@@ -194,8 +212,14 @@ class PLLAttackEnv:
         elif self.task_id == 2 and self.lock_lost:
             self.done = True  # early termination — no point continuing
 
+        # --- Physics-informed detector (evaluation/debug only) ------------
+        detector_output = self.detector.detect(self._get_observation())
+
         # --- Build info --------------------------------------------------
-        info: Dict[str, Any] = {}
+        info: Dict[str, Any] = {
+            "detector": detector_output,
+            "detector_features": {"step": self.step_count, "raw_score": detector_output.get("score")}
+        }
         if self.done:
             info["grader_score"] = self._compute_grader_score()
             info["episode_id"]   = self.episode_id
@@ -224,30 +248,30 @@ class PLLAttackEnv:
 
         if self.attack_active:
             if action.attack_detected:
-                detection_reward = 0.1
+                detection_reward = TRUE_POSITIVE_REWARD
                 # One-time early detection bonus on first correct detection
                 if not self.first_detection_recorded:
                     self.first_detection_step    = self.step_count
                     self.first_detection_recorded = True
                     # Relative steps since attack started
                     t = self.first_detection_step - self.attack_start_step
-                    early_detection_bonus = max(0.0, 1.0 - t / 100.0)
+                    early_detection_bonus = max(0.0, 1.0 - t / EARLY_DETECTION_WINDOW)
             else:
-                detection_reward = -0.05  # missed detection
+                detection_reward = MISSED_DETECTION_PENALTY
         else:
             if action.attack_detected:
-                false_alarm_penalty = -0.2  # false alarm
+                false_alarm_penalty = FALSE_ALARM_PENALTY
             else:
-                detection_reward = 0.05  # correct true negative
+                detection_reward = TRUE_NEGATIVE_REWARD
 
         # Task 1 (medium): per-step classification bonus
         if self.task_id == 1 and self.attack_active:
             if action.attack_type == self.true_attack_type:
-                classification_bonus = 0.05
+                classification_bonus = CLASSIFICATION_BONUS
 
         # Task 2 (hard): one-time lock-loss penalty
         if self.task_id == 2 and self.lock_lost and not self.lock_loss_penalized:
-            lock_loss_penalty        = -2.0
+            lock_loss_penalty        = LOCK_LOSS_PENALTY
             self.lock_loss_penalized = True
 
         total = (
