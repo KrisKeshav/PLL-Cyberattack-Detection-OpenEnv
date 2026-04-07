@@ -20,4 +20,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push https://krishuggingface:${HF_TOKEN}@huggingface.co/spaces/krishuggingface/CyberAttack-PLL HEAD:main --force
+          git push https://krishuggingface:${HF_TOKEN}@huggingface.co/spaces/krishuggingface/CyberAttack-PLL HEAD:main
