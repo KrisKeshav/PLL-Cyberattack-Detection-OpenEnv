@@ -1,3 +1,12 @@
+---
+title: PLL Cyberattack Detection
+emoji: ⚡
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_file: Dockerfile
+pinned: false
+---
 # PLL Cyberattack Detection — OpenEnv
 
 [![HF Space](https://img.shields.io/badge/🤗%20HuggingFace-Space%20Live-blue)](https://huggingface.co/spaces/krishuggingface/CyberAttack-PLL)
