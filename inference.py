@@ -32,6 +32,9 @@ ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7860")
 # OpenAI client pointed at the proxy — never bypass this
 client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
+# Persistent HTTP session for env calls — avoids TCP handshake per step
+_session = requests.Session()
+
 # ── Task metadata ─────────────────────────────────────────────────────────────
 TASK_NAMES = {
     0: "Sinusoidal FDI Detection (Easy)",
@@ -295,11 +298,19 @@ def format_observation(obs: dict) -> str:
         f"raw_voltages: {[round(v, 6) for v in obs['raw_voltages']]}",
     ])
 
+_llm_disabled = False  # circuit breaker — flips True after first LLM failure
+
 
 def llm_agent(obs: dict) -> dict:
     """Primary agent — calls the LLM through the injected proxy.
     Falls back to heuristic only if the API call itself raises an exception.
+    Uses a circuit breaker: after the first failure, all future calls skip the
+    network request and go straight to heuristic (restoring ~10s runtime).
     """
+    global _llm_disabled
+    if _llm_disabled:
+        return heuristic_agent(obs)
+
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
@@ -313,7 +324,8 @@ def llm_agent(obs: dict) -> dict:
         )
         return parse_llm_response(completion.choices[0].message.content or "")
     except Exception as e:
-        print(f"[DEBUG] LLM error ({type(e).__name__}: {e}), falling back to heuristic", file=sys.stderr, flush=True)
+        print(f"[DEBUG] LLM error ({type(e).__name__}: {e}), disabling LLM for remaining steps", file=sys.stderr, flush=True)
+        _llm_disabled = True
         return heuristic_agent(obs)
 
 # ── Episode runner ────────────────────────────────────────────────────────────
@@ -333,7 +345,7 @@ def run_episode(task_id: int) -> float:
     success      = False
 
     try:
-        reset_resp = requests.post(
+        reset_resp = _session.post(
             f"{ENV_URL}/reset",
             json={"task_id": task_id},
             timeout=60,
@@ -346,14 +358,10 @@ def run_episode(task_id: int) -> float:
         info         = {}
 
         while not done:
-            # Frame skipping: only invoke the LLM every 10 steps to prevent 30-min evaluation timeouts.
-            # Step skips use the heuristics to keep episode run-time blazing fast.
-            if step_count % 10 == 0:
-                action = llm_agent(obs)
-            else:
-                action = heuristic_agent(obs)
+            # LLM is primary; circuit breaker auto-disables after first failure
+            action = llm_agent(obs)
 
-            step_resp = requests.post(
+            step_resp = _session.post(
                 f"{ENV_URL}/step",
                 json=action,
                 timeout=60,
@@ -404,7 +412,7 @@ def wait_for_server(env_url: str, timeout: int = 60) -> bool:
     start_t = time.time()
     while time.time() - start_t < timeout:
         try:
-            resp = requests.get(f"{env_url}/health", timeout=2)
+            resp = _session.get(f"{env_url}/health", timeout=2)
             if resp.status_code == 200:
                 print("[DEBUG] Environment server is up!", file=sys.stderr, flush=True)
                 return True
