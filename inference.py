@@ -346,9 +346,9 @@ def run_episode(task_id: int) -> float:
         info         = {}
 
         while not done:
-            # Frame skipping: only invoke the LLM every 5 steps to prevent 30-min evaluation timeouts.
+            # Frame skipping: only invoke the LLM every 10 steps to prevent 30-min evaluation timeouts.
             # Step skips use the heuristics to keep episode run-time blazing fast.
-            if step_count % 5 == 0:
+            if step_count % 10 == 0:
                 action = llm_agent(obs)
             else:
                 action = heuristic_agent(obs)

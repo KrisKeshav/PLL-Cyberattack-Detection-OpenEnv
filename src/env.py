@@ -27,7 +27,7 @@ from src.detector import AdaptiveDetector
 
 
 WINDOW_SIZE = 20
-MAX_STEPS = 500
+MAX_STEPS = 250
 LOCK_LOSS_THRESHOLD = 0.0873  # 5 degrees in radians
 
 DETECTION_THRESHOLD = 2.0

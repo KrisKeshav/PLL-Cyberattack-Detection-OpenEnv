@@ -46,20 +46,20 @@ tasks:
     numeric_id: 0
     grader: time_to_detection
     max_score: 1.0
-    episode_length: 500
+    episode_length: 250
     description: Detect sinusoidal FDI attack within 100 steps of attack start
   - id: multi_attack_classification
     difficulty: medium
     numeric_id: 1
     grader: classification_accuracy
     max_score: 1.0
-    episode_length: 500
+    episode_length: 250
     description: Classify attack type from observation window
   - id: stealthy_attack_detection
     difficulty: hard
     numeric_id: 2
     grader: pre_lock_loss_detection
     max_score: 1.0
-    episode_length: 500
+    episode_length: 250
     description: Detect stealthy low-amplitude attack before PLL loss-of-lock
-episode_length: 500
+episode_length: 250
