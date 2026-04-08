@@ -30,19 +30,21 @@ def grade_task_easy(history: List[Dict[str, Any]], attack_start_step: int) -> fl
             break
 
     if first_correct_detection_step is None:
-        return 0.0
+        return 0.01
 
     delay = first_correct_detection_step - attack_start_step
 
     if delay <= 20:
-        return 1.0
+        score = 0.99
     elif delay <= 100:
-        # Linear decay from 1.0 at delay=20 to 0.5 at delay=100
-        return 1.0 - 0.5 * (delay - 20) / 80.0
+        # Linear decay from 0.99 at delay=20 to 0.5 at delay=100
+        score = 0.99 - 0.49 * (delay - 20) / 80.0
     elif delay <= 420:
-        return 0.2
+        score = 0.2
     else:
-        return 0.0
+        score = 0.01
+
+    return max(0.01, min(0.99, score))
 
 
 def grade_task_medium(history: List[Dict[str, Any]], attack_start_step: int) -> float:
@@ -72,7 +74,7 @@ def grade_task_medium(history: List[Dict[str, Any]], attack_start_step: int) -> 
                 first_correct_classification_step = step
 
     if steps_after_attack == 0:
-        return 0.0
+        return 0.01
 
     base_score = correct_classifications / steps_after_attack
 
@@ -81,8 +83,8 @@ def grade_task_medium(history: List[Dict[str, Any]], attack_start_step: int) -> 
     else:
         early_bonus = 0.0
 
-    score = min(1.0, base_score * 0.6 + early_bonus)
-    return max(0.0, score)
+    score = min(0.99, base_score * 0.6 + early_bonus)
+    return max(0.01, score)
 
 
 def grade_task_hard(
@@ -130,6 +132,6 @@ def grade_task_hard(
 
     # Applying false alarm penalty
     penalty = 0.2 * false_alarm_count
-    score = max(0.0, score - penalty)
+    score = max(0.01, score - penalty)
 
-    return min(1.0, score)
+    return max(0.01, min(0.99, score))
