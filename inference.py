@@ -14,6 +14,7 @@ STDOUT FORMAT (OpenEnv compliance):
 """
 
 import os
+import sys
 import json
 import time
 import requests
@@ -312,7 +313,7 @@ def llm_agent(obs: dict) -> dict:
         )
         return parse_llm_response(completion.choices[0].message.content or "")
     except Exception as e:
-        print(f"[DEBUG] LLM error ({type(e).__name__}: {e}), falling back to heuristic", flush=True)
+        print(f"[DEBUG] LLM error ({type(e).__name__}: {e}), falling back to heuristic", file=sys.stderr, flush=True)
         return heuristic_agent(obs)
 
 # ── Episode runner ────────────────────────────────────────────────────────────
@@ -373,17 +374,17 @@ def run_episode(task_id: int) -> float:
                 print(
                     f"[DEBUG] step={step_count} cumulative_reward={total_reward:+.4f} "
                     f"detected={action['attack_detected']} type={action['attack_type']}",
-                    flush=True,
+                    file=sys.stderr, flush=True,
                 )
 
         grader_score = info.get("grader_score", 0.0)
         success      = grader_score > 0.0
 
     except Exception as exc:
-        print(f"[DEBUG] Episode error: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[DEBUG] Episode error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         success = False
     except BaseException as exc:
-        print(f"[DEBUG] Critical interruption: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[DEBUG] Critical interruption: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         success = False
         raise
 
@@ -395,27 +396,27 @@ def run_episode(task_id: int) -> float:
 # ── Server Check ──────────────────────────────────────────────────────────────
 
 def wait_for_server(env_url: str, timeout: int = 60) -> bool:
-    print(f"[DEBUG] Waiting for environment server at {env_url} to start...", flush=True)
+    print(f"[DEBUG] Waiting for environment server at {env_url} to start...", file=sys.stderr, flush=True)
     start_t = time.time()
     while time.time() - start_t < timeout:
         try:
             resp = requests.get(f"{env_url}/health", timeout=2)
             if resp.status_code == 200:
-                print("[DEBUG] Environment server is up!", flush=True)
+                print("[DEBUG] Environment server is up!", file=sys.stderr, flush=True)
                 return True
         except Exception:
             pass
         time.sleep(1)
-    print(f"[DEBUG] Environment server failed to start within {timeout}s.", flush=True)
+    print(f"[DEBUG] Environment server failed to start within {timeout}s.", file=sys.stderr, flush=True)
     return False
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print(f"[DEBUG] PLL Cyberattack Detection — model={MODEL_NAME} env={ENV_URL}", flush=True)
+    print(f"[DEBUG] PLL Cyberattack Detection — model={MODEL_NAME} env={ENV_URL}", file=sys.stderr, flush=True)
 
     if not wait_for_server(ENV_URL):
-        print("[DEBUG] Exiting due to server unavailable.", flush=True)
+        print("[DEBUG] Exiting due to server unavailable.", file=sys.stderr, flush=True)
         return
 
     start_time = time.time()
@@ -426,16 +427,16 @@ def main() -> None:
             try:
                 score = run_episode(task_id)
             except Exception as exc:
-                print(f"[DEBUG] run_episode({task_id}) crashed: {exc}", flush=True)
+                print(f"[DEBUG] run_episode({task_id}) crashed: {exc}", file=sys.stderr, flush=True)
                 score = 0.0
             scores.append(score)
-            print(f"[DEBUG] task={task_id} score={score:.4f}", flush=True)
+            print(f"[DEBUG] task={task_id} score={score:.4f}", file=sys.stderr, flush=True)
     except BaseException as exc:
-        print(f"[DEBUG] Process interrupted: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[DEBUG] Process interrupted: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     elapsed = time.time() - start_time
     avg     = sum(scores) / len(scores) if scores else 0.0
-    print(f"[DEBUG] avg_score={avg:.4f} elapsed={elapsed:.1f}s", flush=True)
+    print(f"[DEBUG] avg_score={avg:.4f} elapsed={elapsed:.1f}s", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
