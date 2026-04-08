@@ -308,6 +308,7 @@ def llm_agent(obs: dict) -> dict:
             ],
             temperature=0.1,
             max_tokens=200,
+            timeout=10.0,
         )
         return parse_llm_response(completion.choices[0].message.content or "")
     except Exception as e:
@@ -381,28 +382,56 @@ def run_episode(task_id: int) -> float:
     except Exception as exc:
         print(f"[DEBUG] Episode error: {type(exc).__name__}: {exc}", flush=True)
         success = False
+    except BaseException as exc:
+        print(f"[DEBUG] Critical interruption: {type(exc).__name__}: {exc}", flush=True)
+        success = False
+        raise
 
     finally:
         log_end(success=success, steps=step_count, score=grader_score, rewards=rewards)
 
     return grader_score
 
+# ── Server Check ──────────────────────────────────────────────────────────────
+
+def wait_for_server(env_url: str, timeout: int = 60) -> bool:
+    print(f"[DEBUG] Waiting for environment server at {env_url} to start...", flush=True)
+    start_t = time.time()
+    while time.time() - start_t < timeout:
+        try:
+            resp = requests.get(f"{env_url}/health", timeout=2)
+            if resp.status_code == 200:
+                print("[DEBUG] Environment server is up!", flush=True)
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    print(f"[DEBUG] Environment server failed to start within {timeout}s.", flush=True)
+    return False
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     print(f"[DEBUG] PLL Cyberattack Detection — model={MODEL_NAME} env={ENV_URL}", flush=True)
 
+    if not wait_for_server(ENV_URL):
+        print("[DEBUG] Exiting due to server unavailable.", flush=True)
+        return
+
     start_time = time.time()
     scores: List[float] = []
 
-    for task_id in range(3):
-        try:
-            score = run_episode(task_id)
-        except Exception as exc:
-            print(f"[DEBUG] run_episode({task_id}) crashed: {exc}", flush=True)
-            score = 0.0
-        scores.append(score)
-        print(f"[DEBUG] task={task_id} score={score:.4f}", flush=True)
+    try:
+        for task_id in range(3):
+            try:
+                score = run_episode(task_id)
+            except Exception as exc:
+                print(f"[DEBUG] run_episode({task_id}) crashed: {exc}", flush=True)
+                score = 0.0
+            scores.append(score)
+            print(f"[DEBUG] task={task_id} score={score:.4f}", flush=True)
+    except BaseException as exc:
+        print(f"[DEBUG] Process interrupted: {type(exc).__name__}: {exc}", flush=True)
 
     elapsed = time.time() - start_time
     avg     = sum(scores) / len(scores) if scores else 0.0
