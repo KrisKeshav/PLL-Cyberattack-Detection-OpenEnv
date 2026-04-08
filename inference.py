@@ -346,8 +346,12 @@ def run_episode(task_id: int) -> float:
         info         = {}
 
         while not done:
-            # LLM is always primary; heuristic is the silent fallback inside llm_agent()
-            action = llm_agent(obs)
+            # Frame skipping: only invoke the LLM every 5 steps to prevent 30-min evaluation timeouts.
+            # Step skips use the heuristics to keep episode run-time blazing fast.
+            if step_count % 5 == 0:
+                action = llm_agent(obs)
+            else:
+                action = heuristic_agent(obs)
 
             step_resp = requests.post(
                 f"{ENV_URL}/step",
