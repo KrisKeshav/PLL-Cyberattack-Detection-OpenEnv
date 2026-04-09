@@ -112,14 +112,14 @@ def grade_task_hard(
         attack_active = entry["attack_active"]
         attack_detected = entry["attack_detected"]
 
-        # Only counting false alarms before the attack starts
+        # Only count false alarms before the attack starts
         if attack_detected and not attack_active and step < attack_start_step:
             false_alarm_count += 1
 
         if attack_detected and attack_active and first_detection_step is None:
             first_detection_step = step
 
-    # Computing base score
+    # Compute base score
     if first_detection_step is None:
         score = 0.0
     elif loss_of_lock_step is not None and first_detection_step < loss_of_lock_step:
@@ -130,7 +130,7 @@ def grade_task_hard(
         # No loss of lock occurred but attack was detected
         score = 0.3
 
-    # Applying false alarm penalty
+    # Apply false alarm penalty
     penalty = 0.2 * false_alarm_count
     score = max(0.01, score - penalty)
 

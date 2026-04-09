@@ -72,7 +72,7 @@ class PLLAttackEnv:
         self.vq_window: deque = deque(maxlen=WINDOW_SIZE)
         self.vd_window: deque = deque(maxlen=WINDOW_SIZE)
         self.omega_window: deque = deque(maxlen=WINDOW_SIZE)
-        self.omega_deviation_window: deque = deque(maxlen=WINDOW_SIZE)  # Fix 8
+        self.omega_deviation_window: deque = deque(maxlen=WINDOW_SIZE)
 
         # Detector
         self.detector = AdaptiveDetector()
@@ -116,7 +116,7 @@ class PLLAttackEnv:
         # Reset history
         self.history = []
 
-        # Reset observation windows (Fix 6: no theta_err_window)
+        # Reset observation windows
         self.vq_window = deque(maxlen=WINDOW_SIZE)
         self.vd_window = deque(maxlen=WINDOW_SIZE)
         self.omega_window = deque(maxlen=WINDOW_SIZE)
@@ -205,12 +205,11 @@ class PLLAttackEnv:
         # --- Advance step counter ----------------------------------------
         self.step_count += 1
 
-        # --- Episode termination -----------------------------------------
-        # Fix 4: Task 2 terminates early on lock-loss, not just at MAX_STEPS
+        # Terminate Task 2 early upon losing lock to save computational steps
         if self.step_count >= MAX_STEPS:
             self.done = True
         elif self.task_id == 2 and self.lock_lost:
-            self.done = True  # early termination — no point continuing
+            self.done = True
 
         # --- Physics-informed detector (evaluation/debug only) ------------
         detector_output = self.detector.detect(self._get_observation())
@@ -350,7 +349,7 @@ class PLLAttackEnv:
             vq_window=list(self.vq_window),
             vd_window=list(self.vd_window),
             omega_window=list(self.omega_window),
-            omega_deviation_window=list(self.omega_deviation_window),  # Fix 5
+            omega_deviation_window=list(self.omega_deviation_window),
             raw_voltages=[self.pll.va_m, self.pll.vb_m, self.pll.vc_m],
             task_id=self.task_id,
             step=self.step_count,

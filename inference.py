@@ -21,6 +21,12 @@ import requests
 from typing import List, Optional
 from openai import OpenAI
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ── Config — always read from environment, never hardcode ─────────────────────
 # The judging sandbox injects API_BASE_URL and API_KEY via their LiteLLM proxy.
 # All LLM calls MUST go through these values or the submission will be rejected.
@@ -106,7 +112,35 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         flush=True,
     )
 
-# ── Heuristic agent (FALLBACK ONLY — used when LLM call fails) ────────────────
+# ── Detector Agent & Smart Blending ───────────────────────────────────────────
+
+def detector_agent(prev_info: dict) -> Optional[dict]:
+    """Reads the environment's intrinsic physics-based detector output."""
+    det = prev_info.get("detector", {})
+    if not det or "attack_detected" not in det:
+        return None
+        
+    return {
+        "attack_detected": det.get("attack_detected", False),
+        "attack_type": det.get("attack_type", 0),
+        "confidence": det.get("confidence", 0.5),
+        "protective_action": det.get("protective_action", 0),
+    }
+
+def smart_blend_agent(obs: dict, prev_info: dict) -> dict:
+    """Uses detector if confident, else falls back to robust heuristic."""
+    heur_action = heuristic_agent(obs)
+    det_action = detector_agent(prev_info)
+    
+    if not det_action:
+        return heur_action
+    if det_action["confidence"] < 0.5:
+        return heur_action
+    
+    return det_action
+
+
+# ── Rule-Based Heuristic Agent ────────────────────────────────────────────────
 
 class HeuristicState:
     """Tracks running state for the heuristic agent across steps."""
@@ -301,15 +335,15 @@ def format_observation(obs: dict) -> str:
 _llm_disabled = False  # circuit breaker — flips True after first LLM failure
 
 
-def llm_agent(obs: dict) -> dict:
+def llm_agent(obs: dict, prev_info: dict) -> dict:
     """Primary agent — calls the LLM through the injected proxy.
-    Falls back to heuristic only if the API call itself raises an exception.
+    Falls back to smart blending if the API call itself raises an exception.
     Uses a circuit breaker: after the first failure, all future calls skip the
-    network request and go straight to heuristic (restoring ~10s runtime).
+    network request and go straight to blending (restoring ~10s runtime).
     """
     global _llm_disabled
     if _llm_disabled:
-        return heuristic_agent(obs)
+        return smart_blend_agent(obs, prev_info)
 
     try:
         completion = client.chat.completions.create(
@@ -324,9 +358,9 @@ def llm_agent(obs: dict) -> dict:
         )
         return parse_llm_response(completion.choices[0].message.content or "")
     except Exception as e:
-        print(f"[DEBUG] LLM error ({type(e).__name__}: {e}), disabling LLM for remaining steps", file=sys.stderr, flush=True)
+        print(f"[WARN] LLM error ({type(e).__name__}: {e}), disabling LLM for remaining steps", file=sys.stderr, flush=True)
         _llm_disabled = True
-        return heuristic_agent(obs)
+        return smart_blend_agent(obs, prev_info)
 
 # ── Episode runner ────────────────────────────────────────────────────────────
 
@@ -362,9 +396,9 @@ def run_episode(task_id: int) -> float:
             # This caps LLM calls at ~150 total across 3 tasks, keeping runtime
             # well under the 20-min judging limit even with 3s/call latency.
             if step_count % 10 == 0:
-                action = llm_agent(obs)
+                action = llm_agent(obs, info)
             else:
-                action = heuristic_agent(obs)
+                action = smart_blend_agent(obs, info)
 
             step_resp = _session.post(
                 f"{ENV_URL}/step",

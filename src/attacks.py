@@ -109,7 +109,7 @@ class AttackGenerator:
         return 0.0
 
     def is_active(self, current_step: int) -> bool:
-        """Checking if the attack is currently active at this step."""
+        """Check whether the attack is currently active at this specific step."""
         if current_step < self.attack_start_step:
             return False
 
@@ -123,7 +123,7 @@ class AttackGenerator:
 
 
 def get_attack_type_id(attack_type_str: str) -> int:
-    """Mapping attack type string to integer ID."""
+    """Map an attack type string to its corresponding integer ID."""
     mapping = {
         "none": 0,
         "sinusoidal": 1,
