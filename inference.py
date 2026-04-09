@@ -358,8 +358,13 @@ def run_episode(task_id: int) -> float:
         info         = {}
 
         while not done:
-            # LLM is primary; circuit breaker auto-disables after first failure
-            action = llm_agent(obs)
+            # Frame skipping: call LLM every 10 steps, heuristic in between.
+            # This caps LLM calls at ~150 total across 3 tasks, keeping runtime
+            # well under the 20-min judging limit even with 3s/call latency.
+            if step_count % 10 == 0:
+                action = llm_agent(obs)
+            else:
+                action = heuristic_agent(obs)
 
             step_resp = _session.post(
                 f"{ENV_URL}/step",
@@ -389,8 +394,9 @@ def run_episode(task_id: int) -> float:
                     file=sys.stderr, flush=True,
                 )
 
-        grader_score = info.get("grader_score", 0.0)
-        success      = grader_score > 0.0
+        grader_score = info.get("grader_score", 0.01)
+        grader_score = max(0.01, min(0.99, grader_score))  # strict (0, 1)
+        success      = grader_score > 0.01
 
     except Exception as exc:
         print(f"[DEBUG] Episode error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
