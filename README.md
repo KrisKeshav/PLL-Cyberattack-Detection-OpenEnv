@@ -153,7 +153,7 @@ Configure execution behavior locally via a `.env` file (see `.env.example`).
 
 The default hybrid strategy outlined in `inference.py` consistently yields the following evaluation bounds across a full 500-step envelope:
 
-* **Task 0 (Sinusoidal FDI):** 1.0000 
+* **Task 0 (Sinusoidal FDI):** 0.9900 
 * **Task 1 (Multi-Attack Classification):** ~0.8720
 * **Task 2 (Stealthy Drift):** ~0.1639
 * **Aggregate System Average:** `0.6786`
