@@ -8,8 +8,8 @@ parameters, benign grid events, harmonics, PMU latency and all noise streams.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import numpy as np
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import List, Sequence
 
 TWO_PI = 2.0 * math.pi
 SQRT3 = math.sqrt(3.0)
@@ -99,15 +99,6 @@ class SRFPLL:
         self.vd_filtered = 1.0
         self.vd = 1.0
         self.vq = 0.0
-
-    def snapshot(self) -> Dict[str, float]:
-        return {
-            "theta_hat": self.theta_hat,
-            "integrator": self.integrator,
-            "omega_hat": self.omega_hat,
-            "f_filtered": self.f_filtered,
-            "vd_filtered": self.vd_filtered,
-        }
 
     def run(
         self,

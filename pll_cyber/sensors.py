@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Optional, Tuple
 
 import numpy as np
 
@@ -86,10 +86,6 @@ class PMUStream:
         self._v_acc += float(seg.sum())
         self._v_n += seg.size
 
-    def arrived(self, since: float, now: float) -> List[PMUReport]:
-        """Reports that arrived in (since, now]."""
-        return [r for r in self.reports if since < r.t_end + self.latency <= now + 1e-9]
-
     def latest(self, now: float) -> Optional[PMUReport]:
         """Most recent report that has arrived by time `now`."""
         for rep in reversed(self.reports):
@@ -118,7 +114,7 @@ class DisciplinedHoldover:
         self.rocof = 0.0
         self.last_arrival_check = -1.0
 
-    def engage(self, now: float) -> None:
+    def engage(self) -> None:
         self.active = True
         self.last_arrival_check = -1.0
 
