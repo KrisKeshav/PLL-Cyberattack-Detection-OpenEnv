@@ -1,24 +1,26 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 dist/
 build/
 
-# Environment
+# Environments / secrets
 .env
 .venv/
 venv/
 
-# Testing
+# Tooling
 .pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Data
-sample_data/
+# Local outputs
+results/
+*.log
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo

@@ -1,494 +1,326 @@
 """
-Inference Script — PLL Cyberattack Detection OpenEnv
-=====================================================
-Environment variables (injected by the judging sandbox):
-  API_BASE_URL   LiteLLM proxy endpoint  (MUST be used for all LLM calls)
-  API_KEY        LiteLLM proxy key       (MUST be used — do not hardcode keys)
-  MODEL_NAME     Model identifier
-  ENV_URL        Environment server URL  (default: http://localhost:7860)
+Baseline inference — PLL Cyber-Guard OpenEnv
+=============================================
 
-STDOUT FORMAT (OpenEnv compliance):
+Runs an LLM agent (OpenAI-compatible client) on all three tasks with fixed
+seeds and prints OpenEnv-style logs plus a final score table.
+
+Environment variables
+  API_BASE_URL        OpenAI-compatible endpoint      (default: https://router.huggingface.co/v1)
+  MODEL_NAME          model identifier                (default: Qwen/Qwen2.5-72B-Instruct)
+  HF_TOKEN / API_KEY  API key for the endpoint
+  ENV_URL             environment server URL; if unset or unreachable the environment runs in-process
+  AGENT               "llm" (default when a key is set) or "heuristic"
+  EPISODES_PER_TASK   default 3
+  MAX_WORKERS         concurrent episodes, default 3
+  TIME_BUDGET_S       wall-clock budget, default 1050 (17.5 min) — steps beyond it fall back to the heuristic
+
+STDOUT (one block per episode, never interleaved)
   [START] task=<task_name> env=<benchmark> model=<model_name>
-  [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+  [STEP]  step=<n> action=<action_json> reward=<0.00> done=<true|false> error=<msg|null>
   [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import json
+import os
+import re
+import sys
+import threading
 import time
-import requests
-from typing import List, Optional
-from openai import OpenAI
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
-# ── Config — always read from environment, never hardcode ─────────────────────
-# The judging sandbox injects API_BASE_URL and API_KEY via their LiteLLM proxy.
-# All LLM calls MUST go through these values or the submission will be rejected.
+from pll_cyber.baselines import PhysicsHeuristicAgent, _v0_decompose
+
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
-API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "dummy")
-ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7860")
-
-# OpenAI client pointed at the proxy — never bypass this
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-# Persistent HTTP session for env calls — avoids TCP handshake per step
-_session = requests.Session()
-
-# ── Task metadata ─────────────────────────────────────────────────────────────
-TASK_NAMES = {
-    0: "Sinusoidal FDI Detection (Easy)",
-    1: "Multi-Attack Classification (Medium)",
-    2: "Stealthy Attack Detection (Hard)",
-}
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_KEY = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY")
+ENV_URL = os.environ.get("ENV_URL", "").rstrip("/")
+AGENT = os.environ.get("AGENT", "llm" if API_KEY else "heuristic").lower()
+EPISODES_PER_TASK = int(os.environ.get("EPISODES_PER_TASK", "3"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "3"))
+TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_S", "1050"))
+LLM_TIMEOUT_S = float(os.environ.get("LLM_TIMEOUT_S", "25"))
 
 BENCHMARK = "pll-cyberattack-detection"
-
-DEFAULT_ACTION = {
-    "attack_detected": False,
-    "attack_type": 0,
-    "confidence": 0.5,
-    "protective_action": 0,
+TASK_NAMES = {0: "sinusoidal_fdi_detection", 1: "attack_classification_under_disturbances",
+              2: "stealthy_phase_spoofing_mitigation"}
+# Fixed evaluation seeds → reproducible scenarios. Chosen so the first three per task already cover
+# the attack types and an attack-free episode (see scripts/evaluate_baselines.py for 100-seed results).
+EVAL_SEEDS = {
+    0: [1, 8, 2, 3, 9, 4],      # sinusoidal, none, sinusoidal, ...
+    1: [1, 3, 4, 7, 2, 5],      # sinusoidal, pulse, ramp, none, ...
+    2: [1, 4, 2, 3, 5, 6],      # spoofing, none, spoofing, ...
 }
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are an AI agent monitoring a power grid inverter's Phase-Locked Loop (PLL).
-You receive time-windowed sensor readings each step and must detect cyberattacks.
-
-vq_window: q-axis voltage error (should be ~0 when healthy)
-vd_window: d-axis voltage
-omega_window: estimated frequency (normalized, nominal=0)
-omega_deviation_window: frequency deviation from nominal in rad/s (useful for detecting slow phase drift)
-raw_voltages: [va, vb, vc] at current step
-task_id: 0=detect only, 1=classify type, 2=detect stealthy attack
-
-For task_id=0: Focus on detecting any attack (attack_detected=True/False).
-For task_id=1: Also classify the attack type (1=sinusoidal, 2=ramp, 3=pulse).
-For task_id=2: Detect very subtle attacks before the PLL loses lock. Look for slow drifts in omega_deviation and vq.
-
-Analysis tips:
-- In healthy state, vq values should be near 0 and stable.
-- Sinusoidal attacks cause oscillating patterns in vq.
-- Ramp attacks cause steadily increasing vq magnitude.
-- Pulse attacks cause sudden step changes in vq.
-- Stealthy attacks cause very slow, gradual drift in omega_deviation_window.
-- Look at trends across the full window, not just the latest value.
-
-Respond ONLY with valid JSON, no explanation:
-{
-  "attack_detected": <bool>,
-  "attack_type": <int 0-4>,
-  "confidence": <float 0.0-1.0>,
-  "protective_action": <int 0-3>
-}"""
-
-# ── Logging helpers ───────────────────────────────────────────────────────────
-
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+_t0 = time.monotonic()
+_print_lock = threading.Lock()
 
 
-def log_step(step: int, action: dict, reward: float, done: bool, error) -> None:
-    action_str = json.dumps(action, separators=(',', ':'))
-    error_val  = error if error else "null"
-    print(
-        f"[STEP] step={step} action={action_str} "
-        f"reward={reward:.2f} done={str(done).lower()} error={error_val}",
-        flush=True,
-    )
+def _err(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
-        flush=True,
-    )
+# ---------------------------------------------------------------------------
+# Environment adapters (HTTP session or in-process)
+# ---------------------------------------------------------------------------
+class HTTPEnv:
+    def __init__(self, base_url: str, session_id: str):
+        import requests
+        self.s = requests.Session()
+        self.url = base_url
+        self.sid = session_id
 
-# ── Detector Agent & Smart Blending ───────────────────────────────────────────
+    def reset(self, task_id: int, seed: int) -> Dict[str, Any]:
+        r = self.s.post(f"{self.url}/reset", json={"task_id": task_id, "seed": seed, "session_id": self.sid}, timeout=60)
+        r.raise_for_status()
+        return r.json()["observation"]
 
-def detector_agent(prev_info: dict) -> Optional[dict]:
-    """Reads the environment's intrinsic physics-based detector output."""
-    det = prev_info.get("detector", {})
-    if not det or "attack_detected" not in det:
-        return None
-        
-    return {
-        "attack_detected": det.get("attack_detected", False),
-        "attack_type": det.get("attack_type", 0),
-        "confidence": det.get("confidence", 0.5),
-        "protective_action": det.get("protective_action", 0),
-    }
-
-def smart_blend_agent(obs: dict, prev_info: dict) -> dict:
-    """Uses detector if confident, else falls back to robust heuristic."""
-    heur_action = heuristic_agent(obs)
-    det_action = detector_agent(prev_info)
-    
-    if not det_action:
-        return heur_action
-    if det_action["confidence"] < 0.5:
-        return heur_action
-    
-    return det_action
+    def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool]:
+        r = self.s.post(f"{self.url}/step", json={"action": action, "session_id": self.sid}, timeout=60)
+        r.raise_for_status()
+        j = r.json()
+        return j["observation"], float(j["reward"] or 0.0), bool(j["done"])
 
 
-# ── Rule-Based Heuristic Agent ────────────────────────────────────────────────
-
-class HeuristicState:
-    """Tracks running state for the heuristic agent across steps."""
-
+class LocalEnv:
     def __init__(self):
-        self.reset()
+        from pll_cyber.environment import PLLCyberEnvironment
+        self.env = PLLCyberEnvironment()
 
-    def reset(self):
-        self.vq_history        = []
-        self.omega_dev_history = []
-        self.attack_detected   = False
-        self.predicted_type    = 0
-        self.settled_baseline  = None
-        self.peak_vq           = 0.0
+    def reset(self, task_id: int, seed: int) -> Dict[str, Any]:
+        from pll_cyber.evaluation import obs_to_dict
+        return obs_to_dict(self.env.reset(task_id=task_id, seed=seed))
+
+    def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool]:
+        from pll_cyber.evaluation import obs_to_dict
+        from pll_cyber.models import PLLAction
+        o = self.env.step(PLLAction(**action))
+        return obs_to_dict(o), float(o.reward or 0.0), bool(o.done)
 
 
-_hstate = HeuristicState()
-
-
-def heuristic_agent(obs: dict) -> dict:
-    """Rule-based fallback — only called when the LLM request fails."""
-    global _hstate
-
-    vq        = obs["vq_window"]
-    omega_dev = obs["omega_deviation_window"]
-    task_id   = obs["task_id"]
-    step      = obs["step"]
-
-    if step == 0:
-        _hstate.reset()
-
-    vq_abs         = [abs(v) for v in vq]
-    vq_mean        = sum(vq_abs) / len(vq_abs)
-    vq_max         = max(vq_abs)
-    omega_dev_abs  = [abs(v) for v in omega_dev]
-    omega_dev_mean = sum(omega_dev_abs) / len(omega_dev_abs)
-
-    _hstate.vq_history.append(vq_mean)
-    _hstate.omega_dev_history.append(omega_dev_mean)
-    _hstate.peak_vq = max(_hstate.peak_vq, vq_mean)
-
-    if step == 50:
-        _hstate.settled_baseline = omega_dev_mean
-
-    detected = False if step < 25 else (vq_mean > 0.01 or vq_max > 0.025)
-    if detected:
-        _hstate.attack_detected = True
-
-    # ── Task 0: binary detection ──────────────────────────────────────────────
-    if task_id == 0:
-        return {
-            "attack_detected": _hstate.attack_detected,
-            "attack_type": 1 if _hstate.attack_detected else 0,
-            "confidence": min(1.0, vq_mean * 50) if _hstate.attack_detected else 0.8,
-            "protective_action": 1 if _hstate.attack_detected else 0,
-        }
-
-    # ── Task 1: classification ────────────────────────────────────────────────
-    if task_id == 1:
-        if not _hstate.attack_detected:
-            return {
-                "attack_detected": False,
-                "attack_type": 0,
-                "confidence": 0.7,
-                "protective_action": 0,
-            }
-
-        n_elevated = sum(1 for v in _hstate.vq_history if v > 0.01)
-
-        if n_elevated < 5:
-            attack_type = 1
-        else:
-            elevated = [v for v in _hstate.vq_history if v > 0.005]
-            recent   = elevated[-min(20, len(elevated)):]
-
-            current_vs_peak = vq_mean / _hstate.peak_vq if _hstate.peak_vq > 0 else 0
-            zero_crossings  = sum(1 for i in range(1, len(vq)) if vq[i] * vq[i - 1] < 0)
-
-            if len(recent) >= 6:
-                first_third = sum(recent[: len(recent) // 3]) / (len(recent) // 3)
-                last_third  = sum(recent[-len(recent) // 3 :]) / (len(recent) // 3)
-                growth      = last_third / first_third if first_third > 0.001 else 1.0
-            else:
-                growth = 1.0
-
-            if current_vs_peak < 0.15 and _hstate.peak_vq > 0.05:
-                attack_type = 3
-            elif current_vs_peak < 0.4 and n_elevated > 30:
-                attack_type = 3
-            elif zero_crossings >= 2 and growth < 1.5:
-                attack_type = 1
-            elif growth > 1.3:
-                attack_type = 2
-            elif zero_crossings >= 1:
-                attack_type = 1
-            else:
-                vq_diffs = [vq[i] - vq[i - 1] for i in range(1, len(vq))]
-                neg = sum(1 for d in vq_diffs if d < 0)
-                attack_type = 3 if neg > 14 else 1
-
-            _hstate.predicted_type = attack_type
-
-        return {
-            "attack_detected": True,
-            "attack_type": _hstate.predicted_type,
-            "confidence": 0.8,
-            "protective_action": 1,
-        }
-
-    # ── Task 2: stealthy attack ───────────────────────────────────────────────
-    if task_id == 2:
-        drift_detected = False
-        confidence     = 0.3
-
-        if step > 50 and _hstate.settled_baseline is not None:
-            baseline = _hstate.settled_baseline
-            ratio    = omega_dev_mean / baseline if baseline > 0.01 else omega_dev_mean * 100
-
-            if len(_hstate.omega_dev_history) > 10:
-                recent_10  = _hstate.omega_dev_history[-10:]
-                old_10     = (_hstate.omega_dev_history[-20:-10]
-                              if len(_hstate.omega_dev_history) > 20
-                              else _hstate.omega_dev_history[:10])
-                recent_avg = sum(recent_10) / len(recent_10)
-                old_avg    = sum(old_10) / len(old_10)
-                rising     = recent_avg > old_avg * 1.1
-            else:
-                rising = False
-
-            if ratio > 2.0:
-                drift_detected, confidence = True, 0.9
-            elif ratio > 1.3 and rising:
-                drift_detected, confidence = True, 0.8
-            elif rising and vq_mean > 0.1:
-                drift_detected, confidence = True, 0.6
-            elif vq_mean > 0.2:
-                drift_detected, confidence = True, 0.5
-
-        if drift_detected:
-            _hstate.attack_detected = True
-
-        return {
-            "attack_detected": drift_detected,
-            "attack_type": 4 if drift_detected else 0,
-            "confidence": confidence,
-            "protective_action": 2 if drift_detected else 0,
-        }
-
-    return DEFAULT_ACTION.copy()
-
-# ── LLM agent (PRIMARY — always called first) ─────────────────────────────────
-
-def parse_llm_response(response_text: str) -> dict:
+def _server_up(url: str) -> bool:
+    if not url:
+        return False
     try:
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines      = text.split("\n")
-            in_block   = False
-            json_lines: List[str] = []
-            for line in lines:
-                if line.strip().startswith("```") and not in_block:
-                    in_block = True
-                    continue
-                elif line.strip().startswith("```") and in_block:
+        import requests
+        return requests.get(f"{url}/health", timeout=5).status_code == 200
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# LLM agent
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """You are the cyber-security guard of a grid-connected solar inverter. Every 50 ms you receive
+measurements from its Synchronous-Reference-Frame Phase-Locked Loop (SRF-PLL) and must decide whether a
+False-Data-Injection (FDI) attack on the voltage sensors is in progress.
+
+PHYSICS CHEAT-SHEET
+- Healthy grid: vd ≈ 1 pu, vq ≈ 0 (rms < 0.012), frequency ≈ 50 Hz (natural wander ±0.03 Hz), small 5th/7th harmonics.
+- Natural (NOT attacks): phase jumps (short vq spike), balanced sags (all phases dip), single-phase sags
+  (one phase dips; zero-sequence appears AT 50 Hz), harmonic steps, frequency events (RoCoF up to 0.6 Hz/s that the
+  trusted PMU also sees). These last ≤ 0.25 s or are mirrored by the PMU.
+- Attack 1 sinusoidal: interharmonic injection on one phase → zero-sequence content NOT at 50 Hz
+  (diagnostics.v0_offfund_rms high), persistent oscillation of local frequency.
+- Attack 2 ramp: growing DC offset on one phase (phase_dc_offset magnitude keeps increasing).
+- Attack 3 pulse: constant DC offset on one phase for 0.1-0.3 s, then gone. Real grids never have DC offsets.
+- Attack 4 phase spoofing: all three phases rotated together; vq stays clean, but the LOCAL frequency drifts away
+  from the PMU frequency. The PMU is trustworthy but delayed (see pmu.age_ms; it reports the average of the
+  100 ms ending age_ms ago), so compare the PMU with your local frequency from the same moment in trend.f_local_hz.
+  diagnostics.spoof_angle_est_deg integrates that mismatch: |angle| growing past ~3 deg is an attack.
+  The inverter desynchronises (damage) at 10 deg, typically 0.35-0.7 s after the attack starts.
+
+TASKS
+- task 0: detect a sinusoidal FDI (attack_type 1). task 1: detect AND classify (1/2/3) amid natural events.
+- task 2: detect phase spoofing (attack_type 4) and engage protective_action=2 (PMU-aided holdover) in time.
+Once an attack has started the system stays compromised: keep attack_detected=true for the rest of the episode.
+False alarms are heavily penalised; protective_action 2/3 on a healthy grid is costly; 3 (disconnect) is latched.
+
+Reply with ONLY a JSON object:
+{"attack_detected": bool, "attack_type": 0-4, "confidence": 0.0-1.0, "protective_action": 0-3, "reason": "<10 words"}"""
+
+
+def _diagnostics(obs: Dict[str, Any], tracker: PhysicsHeuristicAgent) -> Dict[str, float]:
+    """DSP helpers an engineer would compute on the raw observation (no ground truth involved)."""
+    d = _v0_decompose(obs)
+    tracker.act(obs)            # updates the latency-compensated spoofing angle estimate
+    return {"v0_dc_pu": round(d["dc"], 5), "v0_fundamental_pu": round(d["amp50"], 5),
+            "v0_offfund_rms_pu": round(d["resid_rms"], 5),
+            "spoof_angle_est_deg": round(tracker.angle_est_deg, 2)}
+
+
+def _user_message(obs: Dict[str, Any], diag: Dict[str, float], memory: List[str]) -> str:
+    payload = {
+        "task_id": obs["task_id"], "step": obs["step"], "time_s": obs["time_s"],
+        "inverter_mode": obs["inverter_mode"],
+        "features": obs["features"], "pmu": obs["pmu"], "trend": obs["trend"],
+        "diagnostics": diag, "your_recent_decisions": memory[-6:],
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+_JSON_RE = re.compile(r"\{.*\}", re.S)
+
+
+def parse_action(text: str) -> Optional[Dict[str, Any]]:
+    m = _JSON_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        p = json.loads(m.group(0))
+        det = p.get("attack_detected", False)
+        det = det if isinstance(det, bool) else str(det).lower() == "true"
+        return {
+            "attack_detected": det,
+            "attack_type": max(0, min(4, int(p.get("attack_type", 0)))),
+            "confidence": max(0.0, min(1.0, float(p.get("confidence", 0.5)))),
+            "protective_action": max(0, min(3, int(p.get("protective_action", 0)))),
+        }
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+class LLMAgent:
+    _consecutive_failures = 0
+    _disabled = False
+    _lock = threading.Lock()
+
+    def __init__(self, client):
+        self.client = client
+        self.tracker = PhysicsHeuristicAgent()
+        self.fallback = PhysicsHeuristicAgent()
+        self.memory: List[str] = []
+        self.stats = {"llm": 0, "fallback": 0}
+
+    def act(self, obs: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+        diag = _diagnostics(obs, self.tracker)
+        fb = self.fallback.act(obs)
+        action, error = None, None
+        if not LLMAgent._disabled and time.monotonic() - _t0 < TIME_BUDGET_S:
+            for attempt in range(2):
+                try:
+                    resp = self.client.chat.completions.create(
+                        model=MODEL_NAME, temperature=0.0, max_tokens=120, seed=0, timeout=LLM_TIMEOUT_S,
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                                  {"role": "user", "content": _user_message(obs, diag, self.memory)}],
+                    )
+                    action = parse_action(resp.choices[0].message.content)
+                    if action is None:
+                        error = "unparseable_llm_output"
+                    with LLMAgent._lock:
+                        LLMAgent._consecutive_failures = 0
                     break
-                elif in_block:
-                    json_lines.append(line)
-            text = "\n".join(json_lines)
+                except Exception as e:  # network / auth / rate limit
+                    error = f"{type(e).__name__}"
+                    if getattr(e, "status_code", None) in (401, 402, 403):   # permanent: bad key / no credits
+                        with LLMAgent._lock:
+                            if not LLMAgent._disabled:
+                                LLMAgent._disabled = True
+                                _err(f"[WARN] LLM unavailable (HTTP {e.status_code}); using heuristic fallback")
+                        break
+                    time.sleep(1.5 * (attempt + 1))
+            if action is None and error and error != "unparseable_llm_output":
+                with LLMAgent._lock:
+                    LLMAgent._consecutive_failures += 1
+                    if LLMAgent._consecutive_failures >= 5 and not LLMAgent._disabled:
+                        LLMAgent._disabled = True
+                        _err(f"[WARN] LLM disabled after repeated failures ({error}); using heuristic fallback")
+        elif LLMAgent._disabled:
+            error = "llm_disabled_fallback"
+        else:
+            error = "time_budget_fallback"
+        if action is None:
+            action = fb
+            self.stats["fallback"] += 1
+        else:
+            self.stats["llm"] += 1
+        self.memory.append(f"t={obs['time_s']:.2f}:det={int(action['attack_detected'])},type={action['attack_type']},"
+                           f"prot={action['protective_action']}")
+        return action, error
 
-        parsed = json.loads(text)
-        return {
-            "attack_detected":   bool(parsed.get("attack_detected", False)),
-            "attack_type":       max(0, min(4, int(parsed.get("attack_type", 0)))),
-            "confidence":        max(0.0, min(1.0, float(parsed.get("confidence", 0.5)))),
-            "protective_action": max(0, min(3, int(parsed.get("protective_action", 0)))),
-        }
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return DEFAULT_ACTION.copy()
+
+class HeuristicAgentAdapter:
+    def __init__(self):
+        self.agent = PhysicsHeuristicAgent()
+        self.stats = {"llm": 0, "fallback": 0}
+
+    def act(self, obs: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+        return self.agent.act(obs), None
 
 
-def format_observation(obs: dict) -> str:
-    return "\n".join([
-        f"Step: {obs['step']}",
-        f"Task: {obs['task_id']}",
-        f"vq_window (last 20): {[round(v, 6) for v in obs['vq_window']]}",
-        f"vd_window (last 20): {[round(v, 6) for v in obs['vd_window']]}",
-        f"omega_window (last 20): {[round(v, 6) for v in obs['omega_window']]}",
-        f"omega_deviation_window (last 20): {[round(v, 6) for v in obs['omega_deviation_window']]}",
-        f"raw_voltages: {[round(v, 6) for v in obs['raw_voltages']]}",
-    ])
-
-_llm_disabled = False  # circuit breaker — flips True after first LLM failure
-
-
-def llm_agent(obs: dict, prev_info: dict) -> dict:
-    """Primary agent — calls the LLM through the injected proxy.
-    Falls back to smart blending if the API call itself raises an exception.
-    Uses a circuit breaker: after the first failure, all future calls skip the
-    network request and go straight to blending (restoring ~10s runtime).
-    """
-    global _llm_disabled
-    if _llm_disabled:
-        return smart_blend_agent(obs, prev_info)
-
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": format_observation(obs)},
-            ],
-            temperature=0.1,
-            max_tokens=200,
-            timeout=10.0,
-        )
-        return parse_llm_response(completion.choices[0].message.content or "")
-    except Exception as e:
-        print(f"[WARN] LLM error ({type(e).__name__}: {e}), disabling LLM for remaining steps", file=sys.stderr, flush=True)
-        _llm_disabled = True
-        return smart_blend_agent(obs, prev_info)
-
-# ── Episode runner ────────────────────────────────────────────────────────────
-
-def run_episode(task_id: int) -> float:
-    task_name = TASK_NAMES[task_id]
-
-    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
-
-    # Reset heuristic state before every episode so stale data from a previous
-    # task never bleeds into the next one (also covers the LLM fallback path).
-    _hstate.reset()
-
-    step_count   = 0
-    grader_score = 0.0
+# ---------------------------------------------------------------------------
+# Episode runner
+# ---------------------------------------------------------------------------
+def run_episode(task_id: int, seed: int, make_env, make_agent, label: str) -> Dict[str, Any]:
+    lines = [f"[START] task={TASK_NAMES[task_id]} env={BENCHMARK} model={label}"]
     rewards: List[float] = []
-    success      = False
-
+    score, success, steps = 0.0, False, 0
+    agent = make_agent()
     try:
-        reset_resp = _session.post(
-            f"{ENV_URL}/reset",
-            json={"task_id": task_id},
-            timeout=60,
-        )
-        reset_resp.raise_for_status()
-        obs = reset_resp.json()
-
-        done         = False
-        total_reward = 0.0
-        info         = {}
-
+        env = make_env(f"t{task_id}-s{seed}")
+        obs = env.reset(task_id, seed)
+        done = False
         while not done:
-            # Frame skipping: call LLM every 10 steps, heuristic in between.
-            # This caps LLM calls at ~150 total across 3 tasks, keeping runtime
-            # well under the 20-min judging limit even with 3s/call latency.
-            if step_count % 10 == 0:
-                action = llm_agent(obs, info)
-            else:
-                action = smart_blend_agent(obs, info)
+            action, error = agent.act(obs)
+            obs, reward, done = env.step(action)
+            steps += 1
+            rewards.append(reward)
+            lines.append(f"[STEP] step={steps} action={json.dumps(action, separators=(',', ':'))} "
+                         f"reward={reward:.2f} done={str(done).lower()} error={error or 'null'}")
+        res = obs.get("episode_result") or {}
+        score = float(res.get("grader_score", 0.0))
+        success = True
+    except Exception as e:
+        _err(f"[DEBUG] episode task={task_id} seed={seed} failed: {type(e).__name__}: {e}")
+    lines.append(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} "
+                 f"rewards={','.join(f'{r:.2f}' for r in rewards)}")
+    with _print_lock:
+        print("\n".join(lines), flush=True)
+    return {"task_id": task_id, "seed": seed, "score": score, "success": success, "stats": agent.stats}
 
-            step_resp = _session.post(
-                f"{ENV_URL}/step",
-                json=action,
-                timeout=60,
-            )
-            step_resp.raise_for_status()
-            result = step_resp.json()
-
-            obs         = result["observation"]
-            reward      = result["reward"]
-            done        = result["done"]
-            info        = result.get("info", {})
-            error       = result.get("error", None)
-
-            step_reward   = reward["total"] if isinstance(reward, dict) else float(reward)
-            total_reward += step_reward
-            rewards.append(step_reward)
-
-            step_count += 1
-            log_step(step=step_count, action=action, reward=step_reward, done=done, error=error)
-
-            if step_count % 50 == 0:
-                print(
-                    f"[DEBUG] step={step_count} cumulative_reward={total_reward:+.4f} "
-                    f"detected={action['attack_detected']} type={action['attack_type']}",
-                    file=sys.stderr, flush=True,
-                )
-
-        grader_score = info.get("grader_score", 0.01)
-        grader_score = max(0.01, min(0.99, grader_score))  # strict (0, 1)
-        success      = grader_score > 0.01
-
-    except Exception as exc:
-        print(f"[DEBUG] Episode error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        success = False
-    except BaseException as exc:
-        print(f"[DEBUG] Critical interruption: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        success = False
-        raise
-
-    finally:
-        log_end(success=success, steps=step_count, score=grader_score, rewards=rewards)
-
-    return grader_score
-
-# ── Server Check ──────────────────────────────────────────────────────────────
-
-def wait_for_server(env_url: str, timeout: int = 60) -> bool:
-    print(f"[DEBUG] Waiting for environment server at {env_url} to start...", file=sys.stderr, flush=True)
-    start_t = time.time()
-    while time.time() - start_t < timeout:
-        try:
-            resp = _session.get(f"{env_url}/health", timeout=2)
-            if resp.status_code == 200:
-                print("[DEBUG] Environment server is up!", file=sys.stderr, flush=True)
-                return True
-        except Exception:
-            pass
-        time.sleep(1)
-    print(f"[DEBUG] Environment server failed to start within {timeout}s.", file=sys.stderr, flush=True)
-    return False
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print(f"[DEBUG] PLL Cyberattack Detection — model={MODEL_NAME} env={ENV_URL}", file=sys.stderr, flush=True)
+    use_http = _server_up(ENV_URL)
+    if ENV_URL and not use_http:
+        _err(f"[WARN] ENV_URL={ENV_URL} unreachable — running the environment in-process")
+    make_env = (lambda sid: HTTPEnv(ENV_URL, sid)) if use_http else (lambda sid: LocalEnv())
 
-    if not wait_for_server(ENV_URL):
-        print("[DEBUG] Exiting due to server unavailable.", file=sys.stderr, flush=True)
-        return
+    if AGENT == "llm" and API_KEY:
+        from openai import OpenAI
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+        make_agent = lambda: LLMAgent(client)  # noqa: E731
+        label = MODEL_NAME
+    else:
+        if AGENT == "llm":
+            _err("[WARN] No HF_TOKEN/API_KEY set — running the physics-heuristic baseline instead of the LLM")
+        make_agent = HeuristicAgentAdapter
+        label = "physics-heuristic"
 
-    start_time = time.time()
-    scores: List[float] = []
+    jobs = [(t, s) for t in range(3) for s in EVAL_SEEDS[t][:EPISODES_PER_TASK]]
+    _err(f"[DEBUG] agent={label} env={'http ' + ENV_URL if use_http else 'in-process'} episodes={len(jobs)}")
+    with ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS)) as pool:
+        results = list(pool.map(lambda j: run_episode(j[0], j[1], make_env, make_agent, label), jobs))
 
-    try:
-        for task_id in range(3):
-            try:
-                score = run_episode(task_id)
-            except Exception as exc:
-                print(f"[DEBUG] run_episode({task_id}) crashed: {exc}", file=sys.stderr, flush=True)
-                score = 0.0
-            scores.append(score)
-            print(f"[DEBUG] task={task_id} score={score:.4f}", file=sys.stderr, flush=True)
-    except BaseException as exc:
-        print(f"[DEBUG] Process interrupted: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-
-    elapsed = time.time() - start_time
-    avg     = sum(scores) / len(scores) if scores else 0.0
-    print(f"[DEBUG] avg_score={avg:.4f} elapsed={elapsed:.1f}s", file=sys.stderr, flush=True)
+    print("\n=== Baseline scores ===", flush=True)
+    overall = []
+    for t in range(3):
+        sc = [r["score"] for r in results if r["task_id"] == t]
+        mean = sum(sc) / len(sc)
+        overall.append(mean)
+        print(f"task {t} ({TASK_NAMES[t]}): mean={mean:.3f} scores={[round(x, 3) for x in sc]}", flush=True)
+    llm_steps = sum(r["stats"]["llm"] for r in results)
+    fb_steps = sum(r["stats"]["fallback"] for r in results)
+    print(f"overall mean={sum(overall) / 3:.3f}  agent={label}  llm_steps={llm_steps} fallback_steps={fb_steps} "
+          f"elapsed={time.monotonic() - _t0:.1f}s", flush=True)
 
 
 if __name__ == "__main__":

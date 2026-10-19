@@ -1,17 +1,25 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=7860
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Hugging Face Spaces run containers as uid 1000
+RUN useradd --create-home --uid 1000 app
+WORKDIR /home/app/env
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY . .
+COPY --chown=app:app pll_cyber ./pll_cyber
+COPY --chown=app:app server ./server
+COPY --chown=app:app inference.py openenv.yaml pyproject.toml README.md ./
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s \
-    CMD curl -f http://localhost:7860/health || exit 1
-
+USER app
 EXPOSE 7860
 
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "7860"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7860/health', timeout=4).status == 200 else 1)"
+
+CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port ${PORT}"]

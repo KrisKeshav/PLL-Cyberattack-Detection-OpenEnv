@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLL Cyber-Guard</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --text: #1b1f24; --muted: #5b6573; --border: #dde1e6;
+    --accent: #2f6fde; --local: #2f6fde; --pmu: #d9822b; --attack: #c93c3c; --ok: #2e8b57; --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #9aa4b2; --border: #2a313a;
+            --accent: #6ea0ff; --local: #6ea0ff; --pmu: #f0a35a; --attack: #ff6b6b; --ok: #4fc58a; --code: #1f252d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 16px 56px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; margin: 32px 0 10px; }
+  p { margin: 8px 0; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 720px) { .grid3 { grid-template-columns: 1fr; } }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  pre { background: var(--code); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  select, input, button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+                          background: var(--panel); color: var(--text); }
+  button { background: var(--accent); border-color: var(--accent); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: wait; }
+  svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 6px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; font-size: 14px; margin-top: 10px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>PLL Cyber-Guard</h1>
+  <p class="sub">An OpenEnv environment for cyber-attack detection on grid-connected inverters · v{{VERSION}}</p>
+
+  <div class="panel">
+    <p>Grid-following inverters synchronise to the grid with a <b>phase-locked loop</b>. An attacker who can
+      rewrite its voltage measurements (false-data injection) can desynchronise the inverter from the real grid.
+      The agent watches PLL signals simulated at 5 kHz plus a trusted but delayed PMU stream. Every 50 ms it must decide
+      whether an attack is under way, classify it, and engage a protective action in time. It must also avoid
+      alarming on real grid events: phase jumps, sags, single-phase faults, harmonic steps and frequency events.</p>
+  </div>
+
+  <h2>Tasks</h2>
+  <div class="grid3">
+    <div class="panel"><span class="tag">easy · task 0</span><p><b>Sinusoidal FDI detection.</b> Spot an interharmonic injection on one phase quickly. Some episodes have no attack.</p></div>
+    <div class="panel"><span class="tag">medium · task 1</span><p><b>Classify under disturbances.</b> Tell sinusoidal, ramp and pulse injections apart while natural grid events happen.</p></div>
+    <div class="panel"><span class="tag">hard · task 2</span><p><b>Stealthy phase spoofing.</b> A balanced angle drift the PLL tracks perfectly. Cross-check against the PMU and hold over before 10° of desync.</p></div>
+  </div>
+
+  <h2>Live demo · physics-heuristic baseline</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>Task <select id="task"><option value="0">0 · easy</option><option value="1">1 · medium</option><option value="2" selected>2 · hard</option></select></label>
+      <label>Seed <input id="seed" type="number" min="0" value="1" style="width:90px"></label>
+      <button id="run">Run episode</button>
+      <span id="status" class="tag">idle</span>
+    </div>
+    <svg id="chart" viewBox="0 0 900 300" role="img" aria-label="Local PLL frequency versus PMU frequency"></svg>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--local)"></span>local PLL frequency</span>
+      <span><span class="sw" style="background:var(--pmu)"></span>PMU frequency (delayed, trusted)</span>
+      <span><span class="sw" style="background:var(--attack)"></span>attack onset</span>
+      <span><span class="sw" style="background:var(--ok);height:8px;opacity:.35"></span>agent alarm raised</span>
+    </div>
+    <div class="kv" id="summary"></div>
+  </div>
+
+  <h2>Quick start</h2>
+  <pre>curl -X POST $URL/reset -H 'content-type: application/json' -d '{"task_id": 2, "seed": 7, "session_id": "me"}'
+curl -X POST $URL/step  -H 'content-type: application/json' \
+     -d '{"session_id": "me", "action": {"attack_detected": false, "attack_type": 0, "confidence": 0.9, "protective_action": 0}}'</pre>
+  <p>Endpoints: <code>POST /reset</code> <code>POST /step</code> <code>GET /state</code> <code>GET /tasks</code>
+     <code>GET /schema</code> <code>GET /metadata</code> <code>GET /health</code> <code>WS /ws</code> ·
+     <a href="/docs">OpenAPI docs</a> ·
+     <a href="https://github.com/KrisKeshav/PLL-Cyberattack-Detection-OpenEnv">source</a></p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function draw(data) {
+  const svg = $("chart"), W = 900, H = 300, L = 60, R = 16, T = 14, B = 34;
+  const tr = data.trace, n = tr.length;
+  const ys = tr.flatMap(p => [p.f_local_hz, p.pmu_f_hz]);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  const pad = Math.max(0.02, (hi - lo) * 0.12); lo -= pad; hi += pad;
+  const x = (i) => L + (W - L - R) * i / Math.max(1, n - 1);
+  const y = (v) => T + (H - T - B) * (hi - v) / (hi - lo);
+  const path = (k) => tr.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).join("");
+  let s = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4, yy = y(v);
+    s += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="${css('--border')}"/>`;
+    s += `<text x="${L - 8}" y="${yy + 4}" text-anchor="end" font-size="11" fill="${css('--muted')}">${v.toFixed(2)}</text>`;
+  }
+  tr.forEach((p, i) => { if (p.action.attack_detected) s += `<rect x="${x(i) - 5}" y="${T}" width="10" height="${H - T - B}" fill="${css('--ok')}" opacity=".16"/>`; });
+  const onset = data.scenario.onset_step;
+  if (onset !== null && onset !== undefined) {
+    s += `<line x1="${x(onset)}" x2="${x(onset)}" y1="${T}" y2="${H - B}" stroke="${css('--attack')}" stroke-width="2" stroke-dasharray="5 4"/>`;
+  }
+  s += `<path d="${path('pmu_f_hz')}" fill="none" stroke="${css('--pmu')}" stroke-width="2"/>`;
+  s += `<path d="${path('f_local_hz')}" fill="none" stroke="${css('--local')}" stroke-width="2"/>`;
+  s += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle" font-size="12" fill="${css('--muted')}">decision step (50 ms each)</text>`;
+  s += `<text x="14" y="${(T + H - B) / 2}" font-size="12" fill="${css('--muted')}" transform="rotate(-90 14 ${(T + H - B) / 2})" text-anchor="middle">Hz</text>`;
+  svg.innerHTML = s;
+  const sc = data.scenario, b = data.breakdown;
+  const rows = [
+    ["grader score", data.score.toFixed(3)],
+    ["attack", sc.attack_type_name + (onset != null ? ` (onset step ${onset})` : "")],
+    ["grid events", sc.grid.events.map(e => e.kind).join(", ") || "none"],
+    ["detection delay", b.detection_delay_ms == null ? "n/a" : b.detection_delay_ms + " ms"],
+    ["false-alarm rate", (100 * b.false_alarm_rate).toFixed(1) + " %"],
+    ["unprotected desync at", sc.unmitigated_desync_step == null ? "never" : "step " + sc.unmitigated_desync_step],
+    ["actual max sync error", sc.max_sync_error_deg.toFixed(1) + "°"],
+  ];
+  $("summary").innerHTML = rows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+}
+
+async function run() {
+  $("run").disabled = true; $("status").textContent = "running…";
+  try {
+    const r = await fetch(`/demo?task_id=${$("task").value}&seed=${Math.max(0, +$("seed").value || 0)}`);
+    if (!r.ok) throw new Error(r.status);
+    draw(await r.json()); $("status").textContent = "done";
+  } catch (e) { $("status").textContent = "error " + e.message; }
+  $("run").disabled = false;
+}
+$("run").addEventListener("click", run);
+run();
+</script>
+</body>
+</html>

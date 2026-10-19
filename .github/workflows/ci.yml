@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests
+        run: pytest -q
+      - name: OpenEnv structure
+        run: openenv validate .
+      - name: OpenEnv runtime contract
+        run: |
+          uvicorn server.app:app --port 7860 &
+          for i in $(seq 1 30); do curl -sf localhost:7860/health && break; sleep 1; done
+          openenv validate --url http://localhost:7860 | tee runtime.json
+          python -c "import json,sys; sys.exit(0 if json.load(open('runtime.json'))['passed'] else 1)"
+      - name: Baseline (heuristic, through the server)
+        run: AGENT=heuristic ENV_URL=http://localhost:7860 python inference.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke-test image
+        run: |
+          docker build -t pll-cyberguard .
+          docker run -d -p 7860:7860 --name env pll-cyberguard
+          for i in $(seq 1 30); do curl -sf localhost:7860/health && break; sleep 1; done
+          curl -sf -X POST localhost:7860/reset -H 'content-type: application/json' -d '{"task_id":2,"seed":1}' > /dev/null
