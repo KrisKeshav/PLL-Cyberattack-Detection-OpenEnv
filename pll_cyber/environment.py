@@ -18,7 +18,6 @@ from __future__ import annotations
 import math
 import secrets
 import uuid
-from collections import deque
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -107,7 +106,6 @@ class PLLCyberEnvironment(Environment[PLLAction, PLLObservation, PLLState]):
         self._desync = _DesyncTracker()
         self._desync_shadow = _DesyncTracker()
         self._holdover = DisciplinedHoldover()
-        self._theta_hist: deque = deque(maxlen=6)     # (t0, θ̂ samples) of recent windows
 
         self._mode = "normal"
         self._step = 0
@@ -243,7 +241,6 @@ class PLLCyberEnvironment(Environment[PLLAction, PLLObservation, PLLState]):
         if holdover:      # carry the extrapolated frequency ramp into the next window
             self._holdover.f_hold += self._holdover.rocof * n * DT
         rs = self._shadow.run(vm[0], vm[1], vm[2])
-        self._theta_hist.append((float(out["t"][0]), r.theta_hat))
 
         connected = self._mode != "disconnected"
         had_desync = self._desync.first_step is not None
@@ -267,17 +264,10 @@ class PLLCyberEnvironment(Environment[PLLAction, PLLObservation, PLLState]):
         self._last_window = window
         return window
 
-    def _theta_hat_at(self, t: float) -> Optional[float]:
-        for t0, th in reversed(self._theta_hist):
-            i = int(round((t - t0) / DT))
-            if 0 <= i < len(th):
-                return th[i]
-        return None
-
     def _update_holdover(self, t_next: float) -> None:
         """Engage / steer the PMU-disciplined oscillator before simulating a window."""
         if not self._holdover.active:
-            self._holdover.engage(t_next)
+            self._holdover.engage()
         self._holdover.update(self._pll, self._pmu, t_next)
 
     def _finish(self) -> None:
