@@ -1,8 +1,9 @@
-fastapi==0.115.0
-uvicorn==0.32.0
-pydantic==2.9.0
-numpy==1.26.4
-openai>=1.0.0
-requests>=2.31.0
-openenv-core>=0.2.0
-python-dotenv>=1.0.0
+# Runtime dependencies (pinned for a reproducible Docker image / HF Space)
+openenv-core==0.3.0
+numpy==2.5.4
+fastapi==0.146.0
+uvicorn==0.54.0
+pydantic==2.14.1
+openai==3.35.1
+requests==2.34.2
+python-dotenv==1.2.4
